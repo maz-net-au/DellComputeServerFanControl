@@ -6,11 +6,6 @@ namespace ComputeServerTempMonitor;
 
 class Program
 {
-
-    // TODO
-    // try catch in tasks
-    // try catch control loop
-    // log temps cpu0, cpu1, gpu0, gpu1, currentFanSpeed, targetFanSpeed, reset datetime
     static void Log(string message)
     {
         Console.WriteLine(message);
