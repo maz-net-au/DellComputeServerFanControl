@@ -6,9 +6,6 @@ using System.Runtime.InteropServices.Marshalling;
 namespace ComputeServerTempMonitor;
 
 // TODO:
-// Output values on speed change
-// A key (c?) to reload config while live
-// A key (t?) to set the next cooldown (h:m?) to. e.g. i might set it to 100% for 8 hours while no one is here
 // idle detection (based on power usage? i still want to try and run things cooler)
 // 3d print a guide for air through the T4's
 
@@ -58,6 +55,33 @@ class Program
         }
 
         long spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
+
+        Action<bool> printState = (incHeaders) =>
+        {
+            string headers = "";
+            string values = "";
+
+            foreach (string s in cpuTemps.Keys)
+            {
+                headers += $"{s}\t";
+                values += $"{cpuTemps[s]}\t";
+            }
+            foreach (string s in gpuTemps.Keys)
+            {
+                headers += $"{s}\t";
+                values += $"{gpuTemps[s]}\t";
+            }
+            foreach (string s in fanDetails.Keys)
+            {
+                headers += $"{s}\t";
+                values += $"{fanDetails[s]}\t";
+            }
+            if (incHeaders)
+            {
+                Log(headers);
+            }
+            Log(values);
+        };
 
         // on startup, call IPMI commands to disable PCIe card response
         List<string> result = exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00");
@@ -185,6 +209,7 @@ class Program
                         // call IPMI commands to set fan speed
                         result = exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x02 0xff 0x{newSpeed.ToString("x2")}");
                         currentFanSpeed = newSpeed;
+                        printState(true);
                     }
                     fanDetails["Until"] = new DateTime(spinDown).ToString();
                 }
@@ -226,30 +251,8 @@ class Program
                             int headerRow = 0;
                             while (!Console.KeyAvailable)
                             {
-                                string headers = "";
-                                string values = "";
-
-                                foreach (string s in cpuTemps.Keys)
-                                {
-                                    headers += $"{s}\t";
-                                    values += $"{cpuTemps[s]}\t";
-                                }
-                                foreach (string s in gpuTemps.Keys)
-                                {
-                                    headers += $"{s}\t";
-                                    values += $"{gpuTemps[s]}\t";
-                                }
-                                foreach (string s in fanDetails.Keys)
-                                {
-                                    headers += $"{s}\t";
-                                    values += $"{fanDetails[s]}\t";
-                                }
-                                if (headerRow == 0)
-                                {
-                                    Log(headers);
-                                }
-                                Log(values);
-                                headerRow = (headerRow + 1) % 20;
+                                printState(headerRow % 25 == 0);
+                                headerRow++;
                                 Thread.Sleep(1000);
                             }
                             break;
@@ -311,6 +314,7 @@ class Program
                             {
                                 config = JsonConvert.DeserializeObject<Config>(File.ReadAllText("config.json")) ?? new Config();
                                 Log("config.json loaded");
+                                Log(JsonConvert.SerializeObject(config, Formatting.Indented));
                             }
                             break;
                         //case "f":
