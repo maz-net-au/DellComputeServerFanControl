@@ -1,60 +1,98 @@
-﻿using Newtonsoft.Json;
+﻿using Discord;
+using Discord.Commands;
+using Discord.Interactions;
+using Discord.Net;
+using Discord.WebSocket;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using NvAPIWrapper.Native;
+using NvAPIWrapper.Native.GPU.Structures;
+using NvAPIWrapper.Native.Interfaces.GPU;
 using System;
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Runtime.InteropServices.Marshalling;
+using System.Text;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace ComputeServerTempMonitor;
 
 // TODO:
 // idle detection (based on power usage? i still want to try and run things cooler)
 // 3d print a guide for air through the T4's
+// discord bot?
+// move the map of software to paths and args into config
+// generate the slash commands dynamically
 
 class Program
 {
-    static void Log(string message)
+    private static DiscordSocketClient _client;
+    private readonly CommandService _commands;
+    static int maxCPU = 0;
+    static int maxGPU = 0;
+    static int currentFanSpeed = 0;
+    static long spinDown = 0;
+    static bool IsRunning = true;
+    static bool ForcedGPUIdle = false;
+
+    //static Dictionary<string, string> currentStats = new Dictionary<string, string>();
+    static Dictionary<string, string> cpuTemps = new Dictionary<string, string>();
+    static Dictionary<string, string> gpuTemps = new Dictionary<string, string>();
+    static Dictionary<string, string> fanDetails = new Dictionary<string, string>();
+    static Dictionary<string, SoftwareRef> programs = new Dictionary<string, SoftwareRef>();
+
+    // read config for rules
+    static Config config;
+
+    //static void Log(string message)
+    //{
+    //    Console.WriteLine(message);
+    //}
+
+    private static Task Log(LogMessage msg)
     {
-        Console.WriteLine(message);
+        Console.WriteLine(msg.ToString());
+        return Task.CompletedTask;
     }
 
-    static void Main(string[] args)
+    static async Task Main(string[] args)
     {
         string newMode = "x";
         string mode = ""; // default to displaying temps
 
         CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
-        bool IsRunning = true;
-        int maxCPU = 0;
-        int maxGPU = 0;
-        int currentFanSpeed = 0;
 
-        //Dictionary<string, string> currentStats = new Dictionary<string, string>();
-        Dictionary<string, string> cpuTemps = new Dictionary<string, string>();
-        Dictionary<string, string> gpuTemps = new Dictionary<string, string>();
-        Dictionary<string, string> fanDetails = new Dictionary<string, string>();
 
-        // read config for rules
-        Config config;
         if (File.Exists("config.json"))
         {
-            Log("Loading config.json");
+            await Log(new LogMessage(LogSeverity.Info, "Main", "Loading config.json"));
             config = JsonConvert.DeserializeObject<Config>(File.ReadAllText("config.json")) ?? new Config();
         }
         else
         {
-            Log("config.json not found. Creating default config.");
+            await Log(new LogMessage(LogSeverity.Info, "Main", "config.json not found. Creating default config."));
             config = new Config();
             File.WriteAllText("config.json", JsonConvert.SerializeObject(config));
         }
         
         if (config.IPMIPath == "")
         {
-            Log("No path set to IPMItool. Cannot proceed.");
-            Log("Press any key to exit");
+            await Log(new LogMessage(LogSeverity.Info, "Main", "No path set to IPMItool. Cannot proceed."));
+            await Log(new LogMessage(LogSeverity.Info, "Main", "Press any key to exit"));
             Console.ReadKey();
             return;
         }
 
-        long spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
+        _client = new DiscordSocketClient();
+        _client.Log += Log;
+        _client.Ready += Client_Ready;
+        _client.SlashCommandExecuted += SlashCommandHandler;
+
+        await _client.LoginAsync(TokenType.Bot, config.DiscordBotToken);
+        await _client.StartAsync();
+        //await Task.Delay(-1);
+
+        spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
 
         Action<bool> printState = (incHeaders) =>
         {
@@ -78,9 +116,9 @@ class Program
             }
             if (incHeaders)
             {
-                Log(headers);
+                Console.WriteLine(headers);
             }
-            Log(values);
+            Console.WriteLine(values);
         };
 
         // on startup, call IPMI commands to disable PCIe card response
@@ -90,12 +128,12 @@ class Program
         // set default rate
         result = exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x02 0xff 0x{config.DefaultFanSpeed.ToString("x2")}");
         currentFanSpeed = config.DefaultFanSpeed;
-        Log("Controlling fans");
+        await Log(new LogMessage(LogSeverity.Info, "Main", "Controlling fans"));
         // in a task
         if (config.SMIPath != "")
         {
 
-            Task tGpu = new Task(() =>
+            Task tGpu = new Task(async () =>
             {
                 while (IsRunning)
                 {
@@ -130,14 +168,14 @@ class Program
                     }
                     catch (Exception ex)
                     {
-                        Log("Error reading GPU temps: " + ex.ToString());
+                        await Log(new LogMessage(LogSeverity.Error, "Main", "Error reading GPU temps: " + ex.Message, ex));
                     }
                 }
             }, cancellationTokenSource.Token);
             tGpu.Start();
         }
         // in a task
-        Task tCpu = new Task(() =>
+        Task tCpu = new Task(async () =>
         {
             while (IsRunning)
             {
@@ -172,14 +210,14 @@ class Program
                 }
                 catch (Exception ex)
                 {
-                    Log("Error reading CPU temps: " + ex.ToString());
+                    await Log(new LogMessage(LogSeverity.Error, "Main", "Error reading CPU temps: " + ex.Message, ex));
                 }
             }
         }, cancellationTokenSource.Token);
         tCpu.Start();
 
         // fan control thread
-        Task tFan = new Task(() =>
+        Task tFan = new Task(async () =>
         {
             while (IsRunning)
             {
@@ -198,11 +236,13 @@ class Program
                             newSpeed = Math.Max(newSpeed, fts.MinSpeed);
                     }
                     fanDetails["Fan_%"] = currentFanSpeed.ToString();
-                    fanDetails["To_%"] = newSpeed.ToString();
+                    fanDetails["To__%"] = newSpeed.ToString();
                     if (newSpeed >= currentFanSpeed)
                     {
                         // once fans ramp, set a timer to delay the spin-down response until idle for a long time
-                        spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
+                        // dont reduce / reset any extended timeout
+                        if (spinDown < DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks)
+                            spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
                     }
                     if (newSpeed > currentFanSpeed || DateTime.Now.Ticks > spinDown)
                     {
@@ -215,7 +255,7 @@ class Program
                 }
                 catch (Exception ex)
                 {
-                    Log("Error processing fan speeds: " + ex.ToString());
+                    await Log(new LogMessage(LogSeverity.Error, "Main", "Error processing fan speeds: " + ex.Message));
                 }
             }
         }, cancellationTokenSource.Token);
@@ -247,7 +287,7 @@ class Program
                     switch (mode)
                     {
                         case "d":
-                            Log("Dispaying current state. Press any key to cancel.");
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "Dispaying current state. Press any key to cancel."));
                             int headerRow = 0;
                             while (!Console.KeyAvailable)
                             {
@@ -257,90 +297,32 @@ class Program
                             }
                             break;
                         case "s":
-                            Log("Setting a new fan speed. Enter a number between 0 and 100");
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "Setting a new fan speed. Enter a number between 0 and 100"));
                             string rIn = Console.ReadLine() ?? "";
                             int newSpeed = 0;
                             if (int.TryParse(rIn, out newSpeed))
                             {
-                                if (newSpeed < 0)
-                                    newSpeed = 0;
-                                if (newSpeed > 100)
-                                    newSpeed = 100;
-                                Log($"Setting fan speed to {newSpeed}%");
-                                result = exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x02 0xff 0x{newSpeed.ToString("x2")}");
-                                currentFanSpeed = newSpeed;
-                                spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
+                                await Log(new LogMessage(LogSeverity.Info, "Main", SetFanSpeed(newSpeed)));
                             }
                             else
                             {
-                                Log($"Invalid speed entered: '{rIn}'");
+                                await Log(new LogMessage(LogSeverity.Info, "Main", $"Invalid speed entered: '{rIn}'"));
                             }
                             break;
                         case "r":
-                            Log("Resetting cooldown timer.");
-                            spinDown = DateTime.Now.Ticks;
+                            await Log(new LogMessage(LogSeverity.Info, "Main", Reset()));
                             break;
                         case "t":
-                            Log("Enter a new delay as h:mm or mmm.");
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "Enter a new delay as h:mm or mmm."));
                             string time = Console.ReadLine() ?? "";
-                            if (time.Contains(':'))
-                            {
-                                // hh:mm
-                                string[] parts = time.Split(':');
-                                if (parts.Length == 2)
-                                {
-                                    int hours = 0, minutes = 0;
-                                    if (int.TryParse(parts[0], out hours) && int.TryParse(parts[1], out minutes))
-                                    {
-                                        DateTime endDate = DateTime.Now.AddMinutes((hours * 60) + minutes);
-                                        spinDown = endDate.Ticks;
-                                        Log($"Fan speed timeout will expire at {endDate}");
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                int minutes = 0;
-                                if (int.TryParse(time, out minutes))
-                                {
-                                    DateTime endDate = DateTime.Now.AddMinutes(minutes);
-                                    spinDown = endDate.Ticks;
-                                    Log($"Fan speed timeout will expire at {endDate}");
-                                }
-                            }
+                            await Log(new LogMessage(LogSeverity.Info, "Main", SetTimeout(time)));
                             break;
                         case "c":
-                            if (File.Exists("config.json"))
-                            {
-                                config = JsonConvert.DeserializeObject<Config>(File.ReadAllText("config.json")) ?? new Config();
-                                Log("config.json loaded");
-                                Log(JsonConvert.SerializeObject(config, Formatting.Indented));
-                            }
+                            await Log(new LogMessage(LogSeverity.Info, "Main", LoadConfig()));
                             break;
-                        //case "f":
-                        //    Log("Putting all the GPUs into a low power state.");
-                        //    // P8? P12?
-                        //    try
-                        //    {
-                        //        PhysicalGPUHandle[] handles = GPUApi.EnumTCCPhysicalGPUs();
-                        //        foreach (PhysicalGPUHandle ph in handles)
-                        //        {
-                        //            IPerformanceStates20Info pi = GPUApi.GetPerformanceStates20(ph);
-                        //            var lowPowerState = new PState(pi, NvAPIWrapper.Native.GPU.PerformanceStateId.P8_HDVideoPlayback);
-                        //            Console.WriteLine(JsonConvert.SerializeObject(lowPowerState));
-                        //            NvAPIWrapper.GPU.PhysicalGPU[] gpus = NvAPIWrapper.GPU.PhysicalGPU.GetTCCPhysicalGPUs();
-                        //            foreach (NvAPIWrapper.GPU.PhysicalGPU gpu in gpus)
-                        //            {
-                        //                gpu.
-                        //            }
-                        //            GPUApi.SetPerformanceStates20(ph, pi);
-                        //        }
-                        //    }
-                        //    catch (Exception ex)
-                        //    {
-                        //        Log(ex.ToString());
-                        //    }
-                        //    break;
+                        case "i":
+                            await Log(new LogMessage(LogSeverity.Info, "Main", GPUSleep()));
+                            break;
                         //case "v":
                         //    try
                         //    {
@@ -353,54 +335,204 @@ class Program
                         //    }
                         //    catch (Exception ex)
                         //    {
-                        //        Log(ex.ToString());
+                        //        await Log(new LogMessage(LogSeverity.Info, "Main", ex.ToString()));
                         //    }
                         //    break;
-                        //case "w":
-                        //    Log("Restoring all the GPU to a high power state.");
-                        //    try
-                        //    {
-                        //        PhysicalGPUHandle[] handles2 = GPUApi.EnumTCCPhysicalGPUs();
-                        //        foreach (PhysicalGPUHandle ph in handles2)
-                        //        {
-                        //            IPerformanceStates20Info pi = GPUApi.GetPerformanceStates20(ph);
-                        //            GPUApi.SetPerformanceStates20(ph, pi); // restore all states? or did i just overwrite these until I reboot?
-                        //        }
-                        //    }
-                        //    catch (Exception ex)
-                        //    {
-                        //        Log(ex.ToString());
-                        //    }
-                        //    break;
+                        case "w":
+                            await Log(new LogMessage(LogSeverity.Info, "Main", GPUWake()));
+                            break;
                         case "x":
-                            IsRunning = false;
-                            // restore the fan states so that nothing catches fire
-                            exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x01 0x01");
-                            Log("Disabled manual control.");
-                            exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00");
-                            Log("Restored PCIe cooling response.");
+                            await Log(new LogMessage(LogSeverity.Info, "Main", Exit()));
                             break;
                         default:
-                            Log("'d' to dispay current state. press any key to stop");
-                            Log("'s' to set a new fan speed.");
-                            Log("'r' to reset, and ignore the cooldown timer.");
-                            Log("'c' to reload the configuration file.");
-                            Log("'t' to set a new cooldown delay.");
-                            //Log("'f' for finished, it puts the GPUs into an idle state(P8 or P12 if possible), waits some time and then slows the fans.");
-                            //Log("'w' for wake, which restores the high power states.");
-                            Log("'x' to exit");
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'d' to dispay current state. press any key to stop"));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'s' to set a new fan speed."));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'r' to reset, and ignore the cooldown timer."));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'c' to reload the configuration file."));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'t' to set a new cooldown delay."));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'i' to force the GPUs into an idle state."));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'w' to restores the GPU high power states."));
+                            await Log(new LogMessage(LogSeverity.Info, "Main", "'x' to exit"));
                             break;
                     }
+                    mode = "";
                 }
             }
             catch (Exception ex)
             {
-                Log("In input loop: " + ex.ToString());
+                await Log(new LogMessage(LogSeverity.Info, "Main", "In input loop: " + ex.Message, ex));
             }
         }
         cancellationTokenSource.Cancel();
     }
 
+    public static string Exit()
+    {
+        // quit any running processes?
+        IsRunning = false;
+        // restore the fan states so that nothing catches fire
+        exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x01 0x01");
+        exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00");
+        return "Disabled manual control and restored PCIe cooling response.";
+    }
+
+    public static string Reset() 
+    {
+        spinDown = DateTime.Now.Ticks;
+        return "Resetting cooldown timer.";
+    }
+
+    public static string LoadConfig()
+    {
+        if (File.Exists("config.json"))
+        {
+            config = JsonConvert.DeserializeObject<Config>(File.ReadAllText("config.json")) ?? new Config();
+            // for the comfyUI block, we need to load the model list
+            // we might need to do something for an image picker as well, though that's harder to show examples
+            // the list is too long anyway. i should take a url for new ones and put them in a temp folder. watch the size
+
+            return "config.json loaded";
+        }
+        return "Config file not found.";
+    }
+
+    public static string SetTimeout(string time)
+    {
+        if (time.Contains(':'))
+        {
+            // hh:mm
+            string[] parts = time.Split(':');
+            if (parts.Length == 2)
+            {
+                int hours = 0, minutes = 0;
+                if (int.TryParse(parts[0], out hours) && int.TryParse(parts[1], out minutes))
+                {
+                    DateTime endDate = DateTime.Now.AddMinutes((hours * 60) + minutes);
+                    spinDown = endDate.Ticks;
+                    return $"Fan speed timeout will expire at {endDate}";
+                }
+            }
+        }
+        else
+        {
+            int minutes = 0;
+            if (int.TryParse(time, out minutes))
+            {
+                DateTime endDate = DateTime.Now.AddMinutes(minutes);
+                spinDown = endDate.Ticks;
+                return $"Fan speed timeout will expire at {endDate}";
+            }
+        }
+        return "Invalid timeout set";
+    }
+
+    public static string GPUSleep()
+    {
+        try
+        {
+            PhysicalGPUHandle[] handles = GPUApi.EnumTCCPhysicalGPUs();
+            foreach (PhysicalGPUHandle ph in handles)
+            {
+                GPUApi.SetForcePstate(ph, 8, 2);
+            }
+            ForcedGPUIdle = true;
+            return "Setting all GPUs to a low power state";
+        }
+        catch (Exception ex)
+        {
+            return $"Error when setting GPUs into a low power state: {ex.Message}";
+        }
+    }
+
+    public static string GPUWake()
+    {
+        try
+        {
+            PhysicalGPUHandle[] handles = GPUApi.EnumTCCPhysicalGPUs();
+            foreach (PhysicalGPUHandle ph in handles)
+            {
+                GPUApi.SetForcePstate(ph, 16, 2);
+            }
+            ForcedGPUIdle = false;
+            return "Restoring all GPUs to the default power state";
+        }
+        catch (Exception ex)
+        {
+            return $"Error when restoring all GPUs to the default power state: {ex.Message}";
+        }
+    }
+
+    public static string SetFanSpeed(int newSpeed) 
+    {
+        if (newSpeed < 0)
+            newSpeed = 0;
+        if (newSpeed > 100)
+            newSpeed = 100;
+        List<string> result = exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x02 0xff 0x{newSpeed.ToString("x2")}");
+        currentFanSpeed = newSpeed;
+        spinDown = DateTime.Now.AddSeconds(config.FanSpinDownDelay).Ticks;
+        return $"Set fan speed to {newSpeed}%";
+    }
+
+    public static string StartSoftware(string name)
+    {
+        if (config.Software.ContainsKey(name))
+        {
+            if (!programs.ContainsKey(name))
+            {
+                programs.Add(name, config.Software[name]);
+            }
+            if (programs[name].State != ProcessState.Stopped)
+            {
+                return "Application is already " + Enum.GetName(programs[name].State);
+            }
+            programs[name].State = ProcessState.Starting;
+            ProcessStartInfo procStart = new ProcessStartInfo(programs[name].Path, programs[name].Args);
+            procStart.WorkingDirectory = Path.GetDirectoryName(programs[name].Path);
+            procStart.UseShellExecute = true;
+            programs[name].Proc = Process.Start(procStart);
+            if (programs[name].Proc == null)
+            {
+                programs[name].State = ProcessState.Stopped;
+                return "Application failed to start.";
+            }
+            programs[name].State = ProcessState.Running;
+            return $"Application '{config.Software[name].Name}' started.";
+        }
+        return "Invalid program name.";
+    }
+
+    public static string StopSoftware(string name)
+    {
+        if (programs.ContainsKey(name))
+        {
+            if (programs[name].State == ProcessState.Stopping)
+            {
+                if (programs[name].Proc != null)
+                {
+                    programs[name].Proc.Kill();
+                }
+                programs[name].State = ProcessState.Stopped;
+                return $"Terminating '{config.Software[name].Name}'";
+            }
+            if (programs[name].State != ProcessState.Running)
+            {
+                return "Application is already " + Enum.GetName(programs[name].State);
+            }
+            if (programs[name].Proc == null)
+            {
+                programs[name].State = ProcessState.Stopped;
+                return "Application has no handle.";
+            }
+            programs[name].State = ProcessState.Stopping;
+            if(programs[name].Proc.CloseMainWindow()) // like hitting the X on the window
+                programs[name].State = ProcessState.Stopped;
+            if(programs[name].Proc.HasExited)
+                programs[name].State = ProcessState.Stopped;
+            return $"Application '{config.Software[name].Name}' stopped.";
+        }
+        return "Invalid program name.";
+    }
 
     static List<string> exec(string command, string args)
     {
@@ -430,4 +562,209 @@ class Program
 
         return retMessage;
     }
+
+    public static async Task Client_Ready()
+    {
+        List<ApplicationCommandProperties> applicationCommandProperties = new();
+        // I'm making them as global commands
+        var fansCommand = new SlashCommandBuilder()
+            .WithName("fans")
+            .WithDescription("Control the server's fans manually")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("info")
+                .WithDescription("Get the current state of the server fans")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("set")
+                .WithDescription("Set the speed (%) of the server fans")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("speed", ApplicationCommandOptionType.Integer, "the fan speed to set as a %", isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("timeout")
+                .WithDescription("Set a delay for the fans spin down")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption("timeout", ApplicationCommandOptionType.String, "Enter a new delay as h:mm or mmm", isRequired: true))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("reset")
+                .WithDescription("Reset the delay for the spin down")
+                .WithType(ApplicationCommandOptionType.SubCommand));
+        applicationCommandProperties.Add(fansCommand.Build());
+
+        var gpuCommand = new SlashCommandBuilder()
+            .WithName("gpu")
+            .WithDescription("Controls advanced settings for the Tesla compute units")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("idle")
+                .WithDescription("Force all compute units into a low power state")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("wake")
+                .WithDescription("Allow all compute units to access high power states")
+                .WithType(ApplicationCommandOptionType.SubCommand));
+        applicationCommandProperties.Add(gpuCommand.Build());
+
+        var progList = new SlashCommandOptionBuilder()
+                    .WithName("name")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithDescription("Target application")
+                    .WithRequired(true);
+        foreach (KeyValuePair<string, SoftwareRef> prog in config.Software)
+        {
+            progList.AddChoice(prog.Value.Name, prog.Key);
+        }
+        //.AddChoice("LLM", "llm")
+        //.AddChoice("ComfyUI1", "image-gen-1")
+        //.AddChoice("ComfyUI2", "image-gen-2")
+        //.AddChoice("Bot", "image-gen-bot");
+
+        var programControlCommands = new SlashCommandBuilder()
+            .WithName("software")
+            .WithDescription("Allows starting and stopping of AI software on the compute units")
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("status")
+                .WithDescription("Get the current status of software tasks")
+                .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(new SlashCommandOptionBuilder()
+                .WithName("start")
+                .WithDescription("Starts the select piece of software")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption(progList))
+           .AddOption(new SlashCommandOptionBuilder()
+                .WithName("stop")
+                .WithDescription("Stops the select piece of software")
+                .WithType(ApplicationCommandOptionType.SubCommand)
+                .AddOption(progList));
+        applicationCommandProperties.Add(programControlCommands.Build());
+
+        var statusCommand = new SlashCommandBuilder()
+            .WithName("status")
+            .WithDescription("Gets the full state of the server");
+        applicationCommandProperties.Add(statusCommand.Build());
+
+        try
+        {
+            await _client.BulkOverwriteGlobalApplicationCommandsAsync(applicationCommandProperties.ToArray());
+            // Using the ready event is a simple implementation for the sake of the example. Suitable for testing and development.
+            // For a production bot, it is recommended to only run the CreateGlobalApplicationCommandAsync() once for each command.
+        }
+        catch (ApplicationCommandException exception)
+        {
+            // If our command was invalid, we should catch an ApplicationCommandException. This exception contains the path of the error as well as the error message. You can serialize the Error field in the exception to get a visual of where your error is.
+            var json = JsonConvert.SerializeObject(exception.Errors, Formatting.Indented);
+
+            // You can send this error somewhere or just print it to the console, for this example we're just going to print it.
+            Console.WriteLine(json);
+        }
+    }
+
+    private static async Task SlashCommandHandler(SocketSlashCommand command)
+    {
+        switch (command.Data.Name)
+        {
+            case "fans":
+                {
+                    string comName = command.Data.Options.First().Name;
+                    switch (comName)
+                    {
+                        case "set":
+                            var speed = command.Data.Options.First().Options?.FirstOrDefault()?.Value;
+                            if (speed != null)
+                            {
+                                SetFanSpeed((int)(long)speed);
+                            }
+                            break;
+                        case "timeout":
+                            var time = command.Data.Options.First().Options?.FirstOrDefault()?.Value;
+                            if (time != null)
+                            {
+                                SetTimeout((string)time);
+                            }
+                            break;
+                        case "reset":
+                            await command.RespondAsync(Reset());
+                            break;
+                    }
+                    await command.RespondAsync($"Fans set to {(fanDetails.ContainsKey("Fan_%") ? fanDetails["Fan_%"] : "?")}% and will revert to {(fanDetails.ContainsKey("To__%") ? fanDetails["To__%"] : "?")}% @ {(fanDetails.ContainsKey("Until") ? fanDetails["Until"] : "?")}");
+                    break;
+                }
+            case "gpu":
+                {
+                    string comName = command.Data.Options.First().Name;
+                    switch (comName)
+                    {
+                        case "idle":
+                            await command.RespondAsync(GPUSleep());
+                            break;
+                        case "wake":
+                            await command.RespondAsync(GPUWake());
+                            break;
+                    }
+                    break;
+                }
+            case "software":
+                var action = command.Data.Options?.First()?.Name;
+                var name = command.Data.Options?.First().Options?.FirstOrDefault()?.Value;
+                switch (action)
+                {
+                    case "start":
+                        if (name != null)
+                        {
+                            await command.DeferAsync(false, RequestOptions.Default);
+                            string res = StartSoftware((string)name);
+                            await Log(new LogMessage(LogSeverity.Info, "SlashCommandHandler", res));
+                            await command.ModifyOriginalResponseAsync((s) => { s.Content = res; });
+                        }
+                        break;
+                    case "stop":
+                        if (name != null)
+                        {
+                            await command.DeferAsync(false, RequestOptions.Default);
+                            string res = StopSoftware((string)name);
+                            await Log(new LogMessage(LogSeverity.Info, "SlashCommandHandler", res));
+                            await command.ModifyOriginalResponseAsync((s) => { s.Content = res; });
+                        }
+                        break;
+                    case "status":
+                        string result = "";
+                        foreach (KeyValuePair<string, SoftwareRef> prog in config.Software)
+                        {
+                            result += $"\n{prog.Value.Name} : {(programs.ContainsKey(prog.Key) ? Enum.GetName(programs[prog.Key].State) : "Unknown")}";
+                        }
+                        await command.RespondAsync(result);
+                        break;
+                }                
+                break;
+
+            case "status":
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine($"Server status {DateTime.Now}:\n```CPU Temps: ");
+                foreach (KeyValuePair<string, string> cpu in cpuTemps)
+                {
+                    sb.AppendLine($"\t{cpu.Key}\t{cpu.Value}");
+                }
+                sb.AppendLine($"\nGPU Temps: ");
+                foreach (KeyValuePair<string, string> gpu in gpuTemps)
+                {
+                    sb.AppendLine($"\t{gpu.Key}\t{gpu.Value}");
+                }
+                sb.AppendLine($"GPU Performance State: {(ForcedGPUIdle ? "P8" : "P0")}");
+                sb.AppendLine($"\nFan Speed: ");
+                foreach (KeyValuePair<string, string> fan in fanDetails)
+                {
+                    sb.AppendLine($"\t{fan.Key}\t{fan.Value}");
+                }
+                sb.AppendLine($"\nSoftware: ");
+                foreach (KeyValuePair<string, SoftwareRef> prog in config.Software)
+                {
+                    sb.AppendLine($"\t{prog.Value.Name.PadRight(12, ' ')}\t{(programs.ContainsKey(prog.Key) ? Enum.GetName(programs[prog.Key].State) : "Unknown")}");
+                }
+                sb.AppendLine("```");
+                await command.RespondAsync(sb.ToString());
+                break;
+        }
+        
+    }
 }
+
+
+// 

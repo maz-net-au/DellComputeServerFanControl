@@ -8,6 +8,7 @@ namespace ComputeServerTempMonitor
 {
     public class Config
     {
+        public string DiscordBotToken { get; set; } = "";
         public string SMIPath { get; set; } = "";
         public string IPMIPath { get; set; } = "";
         public string IPMIInterface { get; set; } = "wmi";
@@ -25,6 +26,8 @@ namespace ComputeServerTempMonitor
         {
             new FanTempSpeeds(0, 32)
         };
+        public Dictionary<string, SoftwareRef> Software = new Dictionary<string, SoftwareRef>();
+        public ComfyUIConfig ComfyUI { get; set; } = new ComfyUIConfig();
     }
     public class FanTempSpeeds
     {
@@ -35,5 +38,20 @@ namespace ComputeServerTempMonitor
         }
         public int Temp { get; set; }
         public int MinSpeed { get; set; }
+    }
+
+    public class ComfyUIConfig
+    {
+        public Dictionary<string, Dictionary<string, ComfyUIField>> Flows { get; set; } = new Dictionary<string, Dictionary<string, ComfyUIField>>();
+        public Dictionary<string, List<string>> Options { get; set; } = new Dictionary<string, List<string>>();
+        public string URL { get; set; } = "";
+        public string ModelDirectory { get; set; } = ""; // should populate the list of models from here instead of hard-coding them
+    }
+
+    public class ComfyUIField
+    {
+        public string NodeTitle { get; set; } = "";
+        public string Field { get; set; } = "";
+        public string Type { get; set; } = "";
     }
 }
