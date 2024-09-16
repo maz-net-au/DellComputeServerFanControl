@@ -5,7 +5,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace ComputeServerTempMonitor
+namespace ComputeServerTempMonitor.Discord.Models
 {
     public class ServerInfo
     {
@@ -59,6 +59,12 @@ namespace ComputeServerTempMonitor
         }
     }
 
+    public class CommandUsage
+    {
+        // should total to the same
+        public Dictionary<string, Dictionary<string, uint>> UsagePerServer { get; set; } = new Dictionary<string, Dictionary<string, uint>>();
+        public Dictionary<string, Dictionary<string, uint>> UsagePerUser { get; set; } = new Dictionary<string, Dictionary<string, uint>>();
+    }
     public enum AccessLevel
     {
         None = 0,

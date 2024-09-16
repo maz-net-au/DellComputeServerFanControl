@@ -3,8 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using ComputeServerTempMonitor.Software.Models;
 
-namespace ComputeServerTempMonitor
+namespace ComputeServerTempMonitor.Common
 {
     public class Config
     {
@@ -16,29 +17,31 @@ namespace ComputeServerTempMonitor
         public int GPUCheckingInterval { get; set; } = 5;
         public int CPUCheckingInterval { get; set; } = 5;
         public int FanSpinDownDelay { get; set; } = 3600;
-        public int DefaultFanSpeed { get; set; } = 50;
+        public uint DefaultFanSpeed { get; set; } = 50;
         public int GPUAutoPerfThreshold { get; set; } = 10;
         public int GPUAutoPerfTimeout { get; set; } = 10;
         public List<FanTempSpeeds> CPULimits { get; set; } = new List<FanTempSpeeds>()
-        {
-            new FanTempSpeeds(0, 32)
-        };
+{
+    new FanTempSpeeds(0, 36, 30)
+};
         public List<FanTempSpeeds> GPULimits { get; set; } = new List<FanTempSpeeds>()
-        {
-            new FanTempSpeeds(0, 32)
-        };
+{
+    new FanTempSpeeds(0, 36, 30)
+};
         public Dictionary<string, SoftwareRef> Software = new Dictionary<string, SoftwareRef>();
         public ComfyUIConfig ComfyUI { get; set; } = new ComfyUIConfig();
     }
     public class FanTempSpeeds
     {
-        public FanTempSpeeds(int temp, int speed) 
+        public FanTempSpeeds(int temp, uint speed, uint cardSpeed)
         {
             Temp = temp;
             MinSpeed = speed;
+            MinCardSpeed = cardSpeed;
         }
         public int Temp { get; set; }
-        public int MinSpeed { get; set; }
+        public uint MinCardSpeed { get; set; }
+        public uint MinSpeed { get; set; }
     }
 
     public class ComfyUIConfig
@@ -62,6 +65,8 @@ namespace ComputeServerTempMonitor
     public class ComfyUISettings
     {
         public int CompletionPollingRate { get; set; }
+        public int MaximumFileSize { get; set; }
+        public int MaximumControlsDimension { get; set; }
     }
 
     public class ComfyUIField

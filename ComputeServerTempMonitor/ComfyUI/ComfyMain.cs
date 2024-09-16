@@ -1,4 +1,6 @@
-﻿using Newtonsoft.Json;
+﻿using ComputeServerTempMonitor.ComfyUI.Models;
+using ComputeServerTempMonitor.Common;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Net.Http.Json;
 
@@ -7,6 +9,9 @@ namespace ComputeServerTempMonitor.ComfyUI
     public static class ComfyMain
     {
         const string FLOW_SUFFIX = "_api.json";
+        const string historyFile = "data/comfyHistoryCache.json";
+        const string requestFile = "data/comfyRequestCahge.json";
+        static CancellationToken cancellationToken;
         public static int CurrentQueueLength = 0;
 
         public static Dictionary<string, HistoryResponse> History = new Dictionary<string, HistoryResponse>();
@@ -22,35 +27,41 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             return models;
         }
-
-        public static void SaveCache()
+        
+        private static void SaveCache()
         {
-            File.WriteAllText(Program.config.ComfyUI.Paths.Temp + "_requestCache.json", JsonConvert.SerializeObject(Requests, Formatting.Indented));
-            File.WriteAllText(Program.config.ComfyUI.Paths.Temp + "_historyCache.json", JsonConvert.SerializeObject(History, Formatting.Indented));
+            File.WriteAllText(requestFile, JsonConvert.SerializeObject(Requests, Formatting.Indented));
+            File.WriteAllText(historyFile, JsonConvert.SerializeObject(History, Formatting.Indented));
         }
-        public static void LoadCache()
+
+        public static void Exit()
         {
+            SaveCache();
+        }
+        public static void Init(CancellationToken ct)
+        {
+            cancellationToken = ct;
             try
             {
-                if (File.Exists(Program.config.ComfyUI.Paths.Temp + "_requestCache.json"))
+                if (File.Exists(requestFile))
                 {
-                    Requests = JsonConvert.DeserializeObject<Dictionary<string, GenerationRequest>>(File.ReadAllText(Program.config.ComfyUI.Paths.Temp + "_requestCache.json"));
+                    Requests = JsonConvert.DeserializeObject<Dictionary<string, GenerationRequest>>(File.ReadAllText(requestFile));
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Request cache unable to be loaded: {ex.Message}");
+                SharedContext.Instance.Log(LogLevel.ERR, "ComfyMain", $"Request cache unable to be loaded: {ex.Message}");
             }
             try
             {
-                if (File.Exists(Program.config.ComfyUI.Paths.Temp + "_historyCache.json"))
+                if (File.Exists(historyFile))
                 {
-                    History = JsonConvert.DeserializeObject<Dictionary<string, HistoryResponse>>(File.ReadAllText(Program.config.ComfyUI.Paths.Temp + "_historyCache.json"));
+                    History = JsonConvert.DeserializeObject<Dictionary<string, HistoryResponse>>(File.ReadAllText(historyFile));
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Request cache unable to be loaded: {ex.Message}");
+                SharedContext.Instance.Log(LogLevel.ERR, "ComfyMain", $"Request cache unable to be loaded: {ex.Message}");
             }
         }
 
@@ -82,7 +93,7 @@ namespace ComputeServerTempMonitor.ComfyUI
         private static List<ComfyUIField> GenerateRandoms(string flowName, List<ComfyUIField> replacements, bool nullOnly = true)
         {
             // check config to see if its a Random<> and generate a new random for it
-            foreach (KeyValuePair<string, ComfyUIField> field in Program.config.ComfyUI.Flows[flowName])
+            foreach (KeyValuePair<string, ComfyUIField> field in SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName])
             {
                 // we only care about randoms
                 if (field.Value.Type.StartsWith("Random<"))
@@ -122,7 +133,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                 // if its not there now, its never going to be. fail
                 return null;
             }
-            List<ComfyUI.Image> images = new List<ComfyUI.Image>();
+            List<Image> images = new List<Image>();
             foreach (var node in History[id].outputs)
             {
                 foreach (var results in node.Value)
@@ -132,7 +143,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             if (images.Count < imageNum)
                 return null;
-            ComfyUIField img = new ComfyUIField("Load Image", "image", Program.config.ComfyUI.Paths.Outputs + images[imageNum].filename);
+            ComfyUIField img = new ComfyUIField("Load Image", "image", SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename);
             // should this be so hard-coded?
             if (Requests.ContainsKey(id))
             {
@@ -140,6 +151,9 @@ namespace ComputeServerTempMonitor.ComfyUI
                 List<ComfyUIField> rep = JsonConvert.DeserializeObject<List<ComfyUIField>>(JsonConvert.SerializeObject(Requests[id].replacements));
                 rep.Add(img);
                 rep.Add(vb);
+                // add all the defaults from the original flow?
+                // how do i find the original flow if its a variation of a variation?
+
                 // image needs to be a link to the one we're upscaling
                 return await EnqueueRequest(userId, "flux_variation", GenerateRandoms("flux_variation", rep, false));
             }
@@ -150,14 +164,16 @@ namespace ComputeServerTempMonitor.ComfyUI
             // if we still have the original request, try do a fancy upscale
             if (!History.ContainsKey(id))
             {
+                SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"History does not contain '{id}', attempting to retrieve from ComfyUI");
                 await PopulateHistory(id, 0); // get it if its there
             }
             if (!History.ContainsKey(id))
             {
                 // if its not there now, its never going to be. fail
+                SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Could not retrieve '{id}' from ComfyUI");
                 return null;
             }
-            List<ComfyUI.Image> images = new List<ComfyUI.Image>();
+            List<Image> images = new List<Image>();
             foreach (var node in History[id].outputs)
             {
                 foreach (var results in node.Value)
@@ -167,7 +183,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             if (images.Count < imageNum)
                 return null;
-            ComfyUIField img = new ComfyUIField("Load Image", "image", Program.config.ComfyUI.Paths.Outputs + images[imageNum].filename);
+            ComfyUIField img = new ComfyUIField("Load Image", "image", SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename);
             // should this be so hard-coded?
             if (Requests.ContainsKey(id))
             {
@@ -176,10 +192,12 @@ namespace ComputeServerTempMonitor.ComfyUI
                 rep.Add(img);
                 rep.Add(ub);
                 // image needs to be a link to the one we're upscaling
+                // feed in the default values for the other flow in case they're important?
+                // do we want to do this wholesale?
                 return await EnqueueRequest(userId, "flux_upscale", rep);
             }
             // use the basic upscale if we dont have the original model or prompts
-            Console.WriteLine($"Enqueueing new upscale request for {Program.config.ComfyUI.Paths.Outputs + images[imageNum].filename}");
+            SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
             return await EnqueueRequest(userId, "basic_upscale", new List<ComfyUIField>()
             {
                 img
@@ -193,23 +211,69 @@ namespace ComputeServerTempMonitor.ComfyUI
             {
                 
                 List<ComfyUIField> rep = JsonConvert.DeserializeObject<List<ComfyUIField>>(JsonConvert.SerializeObject(Requests[id].replacements));
-                Console.WriteLine("Enqueueing new regenerate request");
+                SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", "Enqueueing new regenerate request");
                 return await EnqueueRequest(userId, Requests[id].flowName, GenerateRandoms(Requests[id].flowName, rep, false));
             }
+            SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Requests does not contain '{id}'");
             return null;
+        }
+
+        public static List<ComfyUIField> GetDefaults(string flowName)
+        {
+            List<ComfyUIField> defaults = new List<ComfyUIField>();
+            if (!File.Exists(SharedContext.Instance.GetConfig().ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX))
+            {
+                SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"Flow '{flowName}' not found.");
+                return null;
+            }
+            Dictionary<string, Step>? loadedFlow = JsonConvert.DeserializeObject<Dictionary<string, Step>>(File.ReadAllText(SharedContext.Instance.GetConfig().ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX));
+            if (loadedFlow == null)
+            {
+                SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"Flow '{flowName}' unable to be loaded.");
+                return null;
+            }
+            // I need to search the flow for any parameter in the config
+            Dictionary<string, ComfyUIField> allParams = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName];
+            foreach (KeyValuePair<string, Step> pair in loadedFlow)
+            {
+                string title = pair.Value._meta["title"];
+                foreach (ComfyUIField field in allParams.Values)
+                {
+                    if (field.NodeTitle == title)
+                    {
+                        try
+                        {
+                            if (field.Object == "")
+                            {
+                                defaults.Add(new ComfyUIField(title, field.Field, pair.Value.inputs[field.Field], field.Object));
+                            }
+                            else
+                            {
+                                // get the whole object as the value?
+                                defaults.Add(new ComfyUIField(title, field.Field, pair.Value.inputs[field.Object], field.Object));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            SharedContext.Instance.Log(LogLevel.ERR, "ComfyMain", ex.ToString());
+                        }
+                    }
+                }
+            }
+            return defaults;
         }
 
         public static async Task<HistoryResponse?> EnqueueRequest(string userId, string flowName, List<ComfyUIField> replacements)
         {
-            if (!File.Exists(Program.config.ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX))
+            if (!File.Exists(SharedContext.Instance.GetConfig().ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX))
             {
-                Console.WriteLine($"Flow '{flowName}' not found.");
+                SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"Flow '{flowName}' not found.");
                 return null;
             }
-            Dictionary<string, Step>? loadedFlow = JsonConvert.DeserializeObject<Dictionary<string, Step>>(File.ReadAllText(Program.config.ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX));
+            Dictionary<string, Step>? loadedFlow = JsonConvert.DeserializeObject<Dictionary<string, Step>>(File.ReadAllText(SharedContext.Instance.GetConfig().ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX));
             if (loadedFlow == null)
             {
-                Console.WriteLine($"Flow '{flowName}' unable to be loaded.");
+                SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"Flow '{flowName}' unable to be loaded.");
                 return null;
             }
             // find all Randoms and fill them in if there's none
@@ -237,7 +301,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine(ex.ToString());
+                            SharedContext.Instance.Log(LogLevel.ERR, "ComfyMain", ex.ToString());
                         }
                     }
                 }
@@ -247,7 +311,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             //Console.WriteLine(ps);
             try
             {
-                HttpRequestMessage hrm = new HttpRequestMessage(HttpMethod.Post, $"{Program.config.ComfyUI.URL}/prompt");
+                HttpRequestMessage hrm = new HttpRequestMessage(HttpMethod.Post, $"{SharedContext.Instance.GetConfig().ComfyUI.URL}/prompt");
                 //hrm.Headers.Add("Content-Type", "application/json");
                 hrm.Content = new StringContent(ps, System.Text.Encoding.UTF8, "application/json");
                 HttpResponseMessage response = hc.Send(hrm);
@@ -256,12 +320,12 @@ namespace ComputeServerTempMonitor.ComfyUI
                 //Console.WriteLine(JsonConvert.SerializeObject(enqueueResponse));
                 if (enqueueResponse == null)
                 {
-                    Console.WriteLine($"Request not able to be enqueued.");
+                    SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"Request not able to be enqueued.");
                     return null;
                 }
                 if (enqueueResponse.prompt_id == null)
                 {
-                    Console.WriteLine($"No prompt_id returned");
+                    SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"No prompt_id returned");
                     return null;
                 }
                 Requests.Add(enqueueResponse.prompt_id, new GenerationRequest(flowName, replacements));
@@ -271,7 +335,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                 bool success = await PopulateHistory(enqueueResponse.prompt_id, 600000);
                 if (!success)
                 {
-                    Console.WriteLine($"A response wasn't generated before the reqeust timed out");
+                    SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"A response wasn't generated before the reqeust timed out");
                     return null;
                 }
                 if (!History.ContainsKey(enqueueResponse.prompt_id))
@@ -281,7 +345,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex.Message);
+                SharedContext.Instance.Log(LogLevel.ERR, "ComfyMain", ex.Message);
             }
             return new HistoryResponse();
         }
@@ -291,7 +355,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             if (History.ContainsKey(id))
                 return true;
             DateTime start = DateTime.Now;
-            HttpResponseMessage response = await hc.GetAsync($"{Program.config.ComfyUI.URL}/history/{id}");
+            HttpResponseMessage response = await hc.GetAsync($"{SharedContext.Instance.GetConfig().ComfyUI.URL}/history/{id}");
             string body = await response.Content.ReadAsStringAsync();
             int count = 0;
             while (body.Length <= 5) // basically just {} because its not in history yet
@@ -301,7 +365,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                 {
                     if (count % 6 == 0)
                     {
-                        HttpResponseMessage queueRes = await hc.GetAsync($"{Program.config.ComfyUI.URL}/prompt");
+                        HttpResponseMessage queueRes = await hc.GetAsync($"{SharedContext.Instance.GetConfig().ComfyUI.URL}/prompt");
                         string content = await queueRes.Content.ReadAsStringAsync();
                         QueueInfo queueInfo = JsonConvert.DeserializeObject<QueueInfo>(content);
                         CurrentQueueLength = queueInfo.exec_info.queue_remaining;
@@ -317,8 +381,8 @@ namespace ComputeServerTempMonitor.ComfyUI
                 {
                     return false;
                 }
-                Thread.Sleep(Program.config.ComfyUI.Settings.CompletionPollingRate);
-                response = await hc.GetAsync($"{Program.config.ComfyUI.URL}/history/{id}");
+                Thread.Sleep(SharedContext.Instance.GetConfig().ComfyUI.Settings.CompletionPollingRate);
+                response = await hc.GetAsync($"{SharedContext.Instance.GetConfig().ComfyUI.URL}/history/{id}");
                 body = await response.Content.ReadAsStringAsync();
             }
             Dictionary<string, HistoryResponse>? historyResponse = JsonConvert.DeserializeObject<Dictionary<string, HistoryResponse>>(body);
@@ -328,6 +392,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             {
                 History.Add(kvp.Key, kvp.Value); // there's likely to be just one here
             }
+            SaveCache(); // write out the request cache
             return true;
         }
         // get workflow names. takes ComfyUIConfig object
