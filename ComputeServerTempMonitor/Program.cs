@@ -4,6 +4,9 @@ using ComputeServerTempMonitor.Common;
 using ComputeServerTempMonitor.Software;
 using ComputeServerTempMonitor.Hardware;
 using ComputeServerTempMonitor.Discord;
+using ComputeServerTempMonitor.Oobabooga;
+using ComputeServerTempMonitor.Oobabooga.Models;
+using Newtonsoft.Json;
 
 namespace ComputeServerTempMonitor;
 
@@ -25,6 +28,8 @@ namespace ComputeServerTempMonitor;
 // if I can find a way to get the original flow name (store it in a meta field in comfyUI history object somehow?) then i can reroll / variation from history instead of request cache
 // log data as a CSV for server maintenance purposes. good to know temp over time for a year or something
 // nest flows in the config so that they can be disabled
+//  - add config permission to show hidden flows for a server. lets me have more draw commands than other people
+//  - make sure hidden flows still run (e.g. upscale) and then hide those commands
 // allow user level permissions for flows
 // add vram usage to status output
 
@@ -44,6 +49,7 @@ class Program
         // call an exit function for each one
         IsRunning = false;
         cancellationTokenSource.Cancel();
+        OobaboogaMain.Exit();
         ComfyMain.Exit();
         DiscordMain.Exit();
         HardwareMain.Exit();
@@ -52,18 +58,17 @@ class Program
 
     static async Task Main(string[] args)
     {
-        AppDomain.CurrentDomain.ProcessExit += new EventHandler(CurrentDomain_ProcessExit);
-        
         // today we're not wanting to test discord bot features. just get the users set up
         if (!System.Diagnostics.Debugger.IsAttached)
         {
-            
+            AppDomain.CurrentDomain.ProcessExit += new EventHandler(CurrentDomain_ProcessExit);
         }
         // is order important?
         try
         {
             SharedContext.Instance.LoadConfig(configFile); 
 
+            OobaboogaMain.Init(cancellationTokenSource.Token);
             ComfyMain.Init(cancellationTokenSource.Token);
             DiscordMain.Init(cancellationTokenSource.Token);
             HardwareMain.Init(cancellationTokenSource.Token);
@@ -73,10 +78,6 @@ class Program
         {
             SharedContext.Instance.Log(LogLevel.ERR, "Main", ex.ToString());
         }
-        //OobaboogaMain.Init(cancellationTokenSource.Token);
-        //object test = new Dictionary<string, string>();
-        //await OobaboogaMain.RunArbitraryCommand(test);
-        //return;
 
         // put in our external control loop here
         // it'll be a state-machine with the current mode
@@ -85,8 +86,8 @@ class Program
         {
             try
             {
-                if (Console.KeyAvailable)
-                {
+                //if (Console.KeyAvailable)
+                //{
                     ConsoleKeyInfo key = Console.ReadKey(true);
                     string mode = key.KeyChar.ToString().ToLower();
                     switch (mode)
@@ -136,6 +137,9 @@ class Program
                             DiscordMain.LoadUsers();
                             SharedContext.Instance.Log(LogLevel.INFO, "Main", "Users file re-loaded");
                             lastKeyDefault = false;
+                            break;
+                        case "a":
+                            await DiscordMain.TestCommands();
                             break;
                         //case "i":
                         //    SharedContext.Instance.Log(LogLevel.INFO, "Main", GPUSleepAll()));
@@ -212,7 +216,7 @@ class Program
                             lastKeyDefault = true;
                             break;
                     }
-                }
+                //}
             }
             catch (Exception ex)
             {

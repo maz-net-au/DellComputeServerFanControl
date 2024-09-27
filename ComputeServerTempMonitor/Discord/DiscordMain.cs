@@ -16,6 +16,10 @@ using ComputeServerTempMonitor.Software;
 using ComputeServerTempMonitor.Software.Models;
 using Discord.Net;
 using ComputeServerTempMonitor.Hardware;
+using ComputeServerTempMonitor.Oobabooga;
+using ComputeServerTempMonitor.Oobabooga.Models;
+using System.Reactive;
+using System.Reflection;
 
 namespace ComputeServerTempMonitor.Discord
 {
@@ -30,14 +34,41 @@ namespace ComputeServerTempMonitor.Discord
 
         public static async Task InitBot()
         {
-            _client = new DiscordSocketClient();
+            _client = new DiscordSocketClient(new DiscordSocketConfig()
+            {
+                GatewayIntents = GatewayIntents.MessageContent | GatewayIntents.AllUnprivileged
+            });
             _client.Log += DiscordLogger;
             _client.Ready += Client_Ready;
             _client.SlashCommandExecuted += SlashCommandHandler;
             _client.ButtonExecuted += ButtonExecuted;
             _client.SelectMenuExecuted += SelectMenuExecuted;
+            _client.MessageReceived += MessageReceived;
+            _client.MessageUpdated += MessageUpdated;
+            _client.MessageDeleted += MessageDeleted;
+            _client.ThreadDeleted += ThreadDeleted;
+            _client.ThreadUpdated += ThreadUpdated;
             await _client.LoginAsync(TokenType.Bot, SharedContext.Instance.GetConfig().DiscordBotToken);
             await _client.StartAsync();
+        }
+
+        private static async Task ThreadUpdated(Cacheable<SocketThreadChannel, ulong> arg1, SocketThreadChannel arg2)
+        {
+            if (arg2.IsArchived)
+            {
+                // delete archived ones?
+                SharedContext.Instance.Log(LogLevel.WARN, "Discord.ThreadUpdated", "Thread has been archived.");
+                await arg2.SendMessageAsync("Conversation ended: " + DateTime.Now.ToString());
+                var guild = _client.GetGuild(arg2.Guild.Id);
+                await arg2.RemoveUserAsync(guild.CurrentUser);
+                await OobaboogaMain.DeleteChat(arg2.Id);
+            }
+        }
+
+        private static async Task ThreadDeleted(Cacheable<SocketThreadChannel, ulong> arg)
+        {
+            // just delete the chat history
+            await OobaboogaMain.DeleteChat(arg.Id);
         }
 
         public static void LoadUsers()
@@ -274,6 +305,11 @@ namespace ComputeServerTempMonitor.Discord
             WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
             switch (parts[0])
             {
+                case "continue":
+                    {
+                        await arg.RespondAsync("Not implemented yet");
+                    }
+                    break;
                 case "regenerate":
                     {
                         Task.Run(async () =>
@@ -381,7 +417,7 @@ namespace ComputeServerTempMonitor.Discord
                             lsmob.Add(new SelectMenuOptionBuilder("3x", "3.0"));
                         if (maxDim <= 768)
                             lsmob.Add(new SelectMenuOptionBuilder("4x", "4.0"));
-                        SelectMenuBuilder vsmb = new SelectMenuBuilder($"upscale:{hr.prompt[1].ToString()}", lsmob, "Upscale By", 1, 1);
+                        SelectMenuBuilder vsmb = new SelectMenuBuilder($"upscale:{hr.prompt[1].ToString()}", lsmob, "Upscale By", 1, 0);
                         uarb.AddComponent(vsmb.Build());
                         cb.AddRow(uarb);
                     }
@@ -429,13 +465,122 @@ namespace ComputeServerTempMonitor.Discord
             // send a message to my own server to tell me it started?
         }
 
+        private static async Task MessageDeleted(Cacheable<IMessage, ulong> arg1, Cacheable<IMessageChannel, ulong> arg2)
+        {
+            throw new NotImplementedException();
+            // check its a thread with an LLM attached
+            // so i need to find the message in my context and remove it? 
+        }
+
+        private static async Task MessageUpdated(Cacheable<IMessage, ulong> arg1, SocketMessage arg2, ISocketMessageChannel arg3)
+        {
+            // i think arg3 is the thread? maybe? check?
+            if (arg2.Type == MessageType.Default && arg3 is SocketThreadChannel threadChannel)
+            {
+                if (OobaboogaMain.FindExistingChat(arg2.Author.GlobalName, threadChannel.Id) == null)
+                    return;
+                Task.Run(async () =>
+                {
+                    if (arg2.Content == "")
+                    {
+                        SharedContext.Instance.Log(LogLevel.WARN, "DiscordMain", "Unable to read message content. Probably a permissions error");
+                    }
+                    else
+                    {
+                        // replace by ID?
+                        SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM thread message edit received from {arg2.Author.GlobalName}.");
+                        await OobaboogaMain.Replace(arg3.Id, arg2.Id, arg2.Content);
+                    }
+                }, cancellationToken);
+            }
+            // check its a thread with an LLM attached
+            // if i update the context, the next generation will take that into account?
+            throw new NotImplementedException();
+        }
+
+        public static async Task<ulong> SendThreadMessage(ulong tId, string msg, ulong? updateMsgId)
+        {
+            var channel = _client.GetChannel(tId);
+            if (channel is SocketThreadChannel threadChannel)
+            {
+                if (updateMsgId.HasValue)
+                {
+                     IMessage oldMsg = await threadChannel.GetMessageAsync(updateMsgId.Value);
+                    if (oldMsg != null)
+                    {
+                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => { m.Content = msg; });
+                        return updateMsgId.Value;
+                    }
+                }
+                // also, remove all components on all existing messages in the thread?
+                // this is where we'd add all the components
+                var res = await threadChannel.SendMessageAsync(msg);
+                return res.Id;
+            }
+            return 0;
+        }
+
+            private static async Task MessageReceived(SocketMessage arg)
+        {
+            //SharedContext.Instance.Log(LogLevel.INFO, "MessageReceived", $"Received a new message notification: {arg.Type}");
+            // i should probably check for message updates as well
+            if (!arg.Author.IsBot && arg.Type == MessageType.Default)
+            {
+                if (arg.Channel is SocketThreadChannel threadChannel)
+                {
+                    // only the correct user can send messages to their instance of a thread
+                    if (OobaboogaMain.FindExistingChat(arg.Author.GlobalName, threadChannel.Id) == null)
+                        return;
+                    Task.Run(async () =>
+                    {
+                        using (threadChannel.EnterTypingState())
+                        {
+                            if (arg.Content == "")
+                            {
+                                SharedContext.Instance.Log(LogLevel.WARN, "DiscordMain", "Unable to read message content.");
+                            }
+                            else
+                            {
+                                SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM reply received from {arg.Author.GlobalName}.");
+                                LLMResponse res = await OobaboogaMain.Reply(arg.Channel.Id, arg.Id, arg.Content);
+                                if (res != null)
+                                {
+                                    AddLLMUsage(arg.Author.GlobalName, res.PromptTokens, res.CompletionTokens);
+                                    await threadChannel.SendMessageAsync(res.Message); // store the ID of this message against my 
+                                }
+                                else
+                                {
+                                    await threadChannel.SendMessageAsync("This conversation has ended.");
+                                }
+                            }
+                        }
+                    }, cancellationToken);
+                }
+            }
+        }
+
+        private static void AddLLMUsage(string username, uint promptTokens, uint completionTokens)
+        {
+            if (!usage.UsagePerUser.ContainsKey(username))
+                usage.UsagePerUser.Add(username, new Dictionary<string, uint>());
+            if (!usage.UsagePerUser[username].ContainsKey("chat_prompt_tokens"))
+                usage.UsagePerUser[username].Add("chat_prompt_tokens", 0);
+            usage.UsagePerUser[username]["chat_prompt_tokens"] += promptTokens;
+            if (!usage.UsagePerUser[username].ContainsKey("chat_completion_tokens"))
+                usage.UsagePerUser[username].Add("chat_completion_tokens", 0);
+            usage.UsagePerUser[username]["chat_completion_tokens"] += completionTokens;
+
+            File.WriteAllText(usageFile, JsonConvert.SerializeObject(usage, Formatting.Indented));
+        }
+
         private static async Task SlashCommandHandler(SocketSlashCommand command)
         {
             //Console.WriteLine(command.User.Id);
             string guildName = "";
+            SocketGuild guild = null; ;
             if (command.GuildId.HasValue)
             {
-                SocketGuild guild = _client.GetGuild(command.GuildId.Value);
+                guild = _client.GetGuild(command.GuildId.Value);
                 guildName = guild.Name;
                 if (!discordInfo.Servers.ContainsKey(command.GuildId.Value))
                 {
@@ -447,7 +592,7 @@ namespace ComputeServerTempMonitor.Discord
             }
             WriteToUsage(guildName, command.User.GlobalName, command.Data.Name);
             AccessLevel level = discordInfo.CheckPermission(command.GuildId, command.User.Id);
-            SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"{command.User.GlobalName} ({command.User}) attempted to use {command.Data.Name} with permissions {Enum.GetName<AccessLevel>(level)}");
+            SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"{command.User.GlobalName} ({command.User.Username}) attempted to use '{command.Data.Name}' with permissions {Enum.GetName<AccessLevel>(level)}");
             if (level == AccessLevel.None)
             {
                 await command.RespondAsync($"Command '{command.Data.Name}' not allowed.");
@@ -467,7 +612,7 @@ namespace ComputeServerTempMonitor.Discord
                         var flowName = comfyFlow;
                         foreach (var op in command.Data.Options)
                         {
-                            if (SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].Type == "Attachment" && op.Value.GetType() != typeof(string))
+                            if (SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Type == "Attachment" && op.Value.GetType() != typeof(string))
                             {
                                 // upload to temp location
                                 // replace with string. full path to image or partial?
@@ -476,13 +621,19 @@ namespace ComputeServerTempMonitor.Discord
                                 if (attch != null)
                                 {
                                     string imgPath = await ComfyMain.DownloadImage(attch.Url, $"{SharedContext.Instance.GetConfig().ComfyUI.Paths.Temp}{randomId}_{attch.Filename}");
-                                    fields.Add(new ComfyUIField(SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].NodeTitle, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].Field, imgPath, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].Object));
+                                    var f = new ComfyUIField(SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].NodeTitle, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Field, imgPath, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Object);
+                                    f.Type = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Type;
+                                    f.Filter = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Filter;
+                                    fields.Add(f);
                                 }
                                 // dont add if there's a problem
                             }
                             else
                             {
-                                fields.Add(new ComfyUIField(SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].NodeTitle, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].Field, op.Value, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName][op.Name].Object));
+                                var f = new ComfyUIField(SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].NodeTitle, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Field, op.Value, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Object);
+                                f.Type = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Type;
+                                f.Filter = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields[op.Name].Filter;
+                                fields.Add(f);
                             }
                         }
                         await command.ModifyOriginalResponseAsync((s) => { s.Content = $"Request received.\n{GetDrawStatus()}"; });
@@ -490,7 +641,7 @@ namespace ComputeServerTempMonitor.Discord
                         //SharedContext.Instance.Log(LogLevel.INFO, "ComfyUI", JsonConvert.SerializeObject(res)));
                         if (res == null || res.status.status_str != "success")
                         {
-                            await command.ModifyOriginalResponseAsync((s) => { s.Content = "Your request has failed."; });
+                            await command.ModifyOriginalResponseAsync((s) => { s.Content = "Your request has failed.";});
                         }
                         else
                         {
@@ -528,6 +679,124 @@ namespace ComputeServerTempMonitor.Discord
                 // draw command found
                 return;
             }
+            switch (command.Data.Name)
+            {
+                case "chat":
+                    {
+                        // LLM stuff!
+                        // start a new chat
+                        string charName = "";
+                        string systemPrompt = "";
+                        foreach (var op in command.Data.Options)
+                        {
+                            switch (op.Name)
+                            {
+                                case "to":
+                                    charName = (string)op.Value;
+                                    break;
+                                case "system_prompt":
+                                    systemPrompt = (string)op.Value;
+                                    break;
+                            }
+                        }
+                        Task.Run(async () =>
+                        {
+                            // start a new thread? can i reply inside that?
+                            if (command.Channel is SocketTextChannel textChannel)
+                            {
+                                ChatHistory ch = OobaboogaMain.FindExistingChat(command.User.GlobalName);
+                                if (ch != null)
+                                {
+                                    // check if it exists
+                                    var g = _client.GetGuild(ch.ServerId);
+                                    SocketThreadChannel oldsct = g.GetThreadChannel(ch.ThreadId); // this will only work if the current guild is the one that made it
+                                    if (oldsct != null && !oldsct.IsArchived)
+                                    {
+                                            // dont start a new one for now
+                                            await command.RespondAsync("Please close your existing conversations with the bot first.", null, false, true);
+                                            // should this have a button to close it for you?
+                                            return;
+                                    }
+                                    else
+                                    {
+                                        // its already archived or deleted
+                                        OobaboogaMain.DeleteChat(ch.ThreadId);
+                                    }
+                                }
+                                await command.DeferAsync();
+                                SocketThreadChannel stc = await textChannel.CreateThreadAsync(SharedContext.Instance.GetConfig().Oobabooga.DisplayCharacters[charName].DisplayName, ((bool)discordInfo.GetPreference(command.GuildId, PreferenceNames.CreatePrivateThreads) ? ThreadType.PrivateThread : ThreadType.PublicThread));
+                                using (stc.EnterTypingState())
+                                {
+                                    // add the user to the private chat we've just created
+                                    if (guild != null)
+                                    {
+                                        IGuildUser usr = guild.GetUser(command.User.Id);
+                                        await stc.AddUserAsync(usr);
+                                    }
+                                    ChatHistory res = await OobaboogaMain.InitChat(command.User.GlobalName, charName, systemPrompt, stc.Id, stc.Guild.Id);
+
+                                    if (res != null)
+                                    {
+                                        // send the greeting if we've got one
+                                        //foreach (OpenAIMessage msg in res.Messages)
+                                        //{
+                                        //    if (msg.role != Enum.GetName(Roles.system) && msg.content != "")
+                                        //        await stc.SendMessageAsync(msg.content);
+                                        //}
+                                        if (res.Greeting != null && res.Greeting != "")
+                                        {
+                                            ComponentBuilder cb = new ComponentBuilder();
+                                            ActionRowBuilder arb = new ActionRowBuilder();
+                                            ButtonBuilder bbredo = new ButtonBuilder($"Continue", $"continue", ButtonStyle.Primary, null, new Emoji("➡"), false, null);
+                                            arb.AddComponent(bbredo.Build());
+                                            cb.AddRow(arb);
+                                            await stc.SendMessageAsync(res.Greeting, false, null, null, null, null, cb.Build());
+                                        }
+                                        await command.DeleteOriginalResponseAsync();
+                                    }
+                                    else
+                                    {
+                                        await command.RespondAsync("Unable to start chat.", null, false, true);
+                                    }
+                                }
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
+                case "ask":
+                    {
+                        string systemPrompt = "";
+                        string request = "";
+                        foreach (var op in command.Data.Options)
+                        {
+                            switch (op.Name)
+                            {
+                                case "system_prompt":
+                                    systemPrompt = (string)op.Value;
+                                    break;
+                                case "question":
+                                    request = (string)op.Value;
+                                    break;
+                            }
+                        }
+                        if (request == "")
+                        {
+                            await command.RespondAsync($"Prompt is mandatory.", null, false, true);
+                            return;
+                        }
+                        Task.Run(async () =>
+                        {
+                            await command.DeferAsync();
+                            using (command.Channel.EnterTypingState())
+                            {
+                                LLMResponse res = await OobaboogaMain.Ask(request, systemPrompt);
+                                AddLLMUsage(command.User.GlobalName, res.PromptTokens, res.CompletionTokens);
+                                await command.ModifyOriginalResponseAsync(s => s.Content = res.Message);
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
+            }            
             // user commands
             switch (command.Data.Name)
             {
@@ -549,6 +818,26 @@ namespace ComputeServerTempMonitor.Discord
             // admin commands
             switch (command.Data.Name)
             {
+                case "loadllm":
+                    {
+                        string model = "";
+                        foreach (var op in command.Data.Options)
+                        {
+                            switch (op.Name)
+                            {
+                                case "model":
+                                    model = (string)op.Value;
+                                    break;
+                            }
+                        }
+                        await command.DeferAsync();
+                        Task.Run(async () =>
+                        {
+                            await OobaboogaMain.LoadModel(model);
+                            await command.RespondAsync($"Load LLM model is now '{OobaboogaMain.GetLoadedModel()}'");
+                        }, cancellationToken);
+                        return;
+                    }
                 case "user":
                     {
                         string uaction = ""; // add or remove
@@ -709,8 +998,9 @@ namespace ComputeServerTempMonitor.Discord
                     break;
                 case "reregister":
                     {
-                        SendCommands();
-                        await command.RespondAsync("Discord commands reregistered");
+                        ulong guildId = (command.GuildId.HasValue ? command.GuildId.Value : 0);
+                        await SendCommands(guildId);
+                        await command.RespondAsync($"Discord commands reregistered{(guildId != 0 ? " for guild '" + guild?.Name + "'" : "")}");
                     }
                     return;
                 case "fans":
@@ -741,19 +1031,35 @@ namespace ComputeServerTempMonitor.Discord
                         return;
                     }
                 default:
-                    await command.RespondAsync($"Command '{command.Data.Name}' not found.");
+                    if (System.Diagnostics.Debugger.IsAttached)
+                    {
+                        await command.RespondAsync($"Command '{command.Data.Name}' not found.");
+                    }
                     return; // failed
             }
 
         }
 
-
-        public static async Task SendCommands()
+        public static async Task TestCommands()
         {
-            List<ApplicationCommandProperties> applicationCommandProperties = new();
-            List<ApplicationCommandProperties> guildCommandProperties = new();
-            // I'm making them as global commands
-            // owner - my server only?
+            
+        }
+
+        public static bool CommandAllowed(ulong serverId, string commands)
+        {
+            return (serverId == discordInfo.OwnerServer || discordInfo.GlobalCommands.Contains(commands) || discordInfo.Servers[serverId].AllowedCommands.Contains(commands));
+        }
+
+        public static async Task SendCommands(ulong updatedGuildId = 0)
+        {
+            // limiter
+            int commandLimit = 25;
+
+            // per guild
+            Dictionary<ulong, List<ApplicationCommandProperties>> guildCommands = new Dictionary<ulong, List<ApplicationCommandProperties>>();
+
+            // set up some reusable command groups
+
             var fansCommand = new SlashCommandBuilder()
                 .WithName("fans")
                 .WithDescription("Control the server's fans manually")
@@ -771,26 +1077,16 @@ namespace ComputeServerTempMonitor.Discord
                     .WithName("reset")
                     .WithDescription("Reset the delay for the spin down")
                     .WithType(ApplicationCommandOptionType.SubCommand));
-            guildCommandProperties.Add(fansCommand.Build());
 
-            // owner - my server only
             var regCommand = new SlashCommandBuilder()
                 .WithName("reregister")
                 .WithDescription("Rebuilds the discord slash command set from the current config");
-            guildCommandProperties.Add(regCommand.Build());
 
-            var llmCommands = new SlashCommandBuilder()
-                .WithName("llm")
-                .WithDescription("Starts a conversation with the LLM in a new thread")
-                .AddOption("prompt", ApplicationCommandOptionType.String, "The initial request to the LLM", true);
-            guildCommandProperties.Add(llmCommands.Build());
-
-            // admin - my server only?
             var progList = new SlashCommandOptionBuilder()
-                        .WithName("name")
-                        .WithType(ApplicationCommandOptionType.String)
-                        .WithDescription("Target application")
-                        .WithRequired(true);
+                .WithName("name")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithDescription("Target application")
+                .WithRequired(true);
             foreach (KeyValuePair<string, SoftwareRef> prog in SharedContext.Instance.GetConfig().Software)
             {
                 progList.AddChoice(prog.Value.Name, prog.Key);
@@ -803,14 +1099,12 @@ namespace ComputeServerTempMonitor.Discord
                     .WithDescription("Starts the select piece of software")
                     .WithType(ApplicationCommandOptionType.SubCommand)
                     .AddOption(progList))
-               .AddOption(new SlashCommandOptionBuilder()
+                .AddOption(new SlashCommandOptionBuilder()
                     .WithName("stop")
                     .WithDescription("Stops the select piece of software")
                     .WithType(ApplicationCommandOptionType.SubCommand)
                     .AddOption(progList));
-            guildCommandProperties.Add(programControlCommands.Build());
 
-            // admin
             var usersCommand = new SlashCommandBuilder()
                 .WithName("user")
                 .WithDescription("Adds or removes a user in the current server")
@@ -829,20 +1123,59 @@ namespace ComputeServerTempMonitor.Discord
                     .WithRequired(true)
                     .AddChoice("admin", "admin")
                     .AddChoice("user", "user"));
-            applicationCommandProperties.Add(usersCommand.Build());
 
-            // user
-            int commandLimit = 25;
-            // everything is limited to the first 25
-            foreach (KeyValuePair<string, Dictionary<string, ComfyUIField>> flow in SharedContext.Instance.GetConfig().ComfyUI.Flows)
+            var llmmodels = new SlashCommandOptionBuilder()
+                    .WithName("model")
+                    .WithDescription("The model to load for this chat")
+                    .WithType(ApplicationCommandOptionType.String);
+            foreach (KeyValuePair<string, ModelConfig> mdlsItem in SharedContext.Instance.GetConfig().Oobabooga.Models)
             {
+                llmmodels.AddChoice(mdlsItem.Key, mdlsItem.Key);
+            }
+
+            var loadLLMCommand = new SlashCommandBuilder()
+                .WithName("loadllm")
+                .WithDescription("Loads a new model for the LLM chat bot")
+                .AddOption(llmmodels); // I want to have some admin commands for now
+
+            var characters = new SlashCommandOptionBuilder()
+                    .WithName("to")
+                    .WithDescription("The character to start a chat with")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true);
+            Dictionary<string, CharacterSettings> chars = SharedContext.Instance.GetConfig().Oobabooga.DisplayCharacters;
+            foreach (var item in chars)
+            {
+                characters.AddChoice(item.Value.DisplayName, item.Key);
+            }
+            var llmChatCommands = new SlashCommandBuilder()
+                .WithName("chat")
+                .WithDescription("Starts a conversation with the LLM in a new thread")
+                .AddOption(characters) // there will be others here? maybe?
+                .AddOption("system_prompt", ApplicationCommandOptionType.String, "The system prompt to use for this conversation", false);
+
+            var llmAskCommands = new SlashCommandBuilder()
+                .WithName("ask")
+                .WithDescription("Ask the LLM a question")
+                .AddOption("question", ApplicationCommandOptionType.String, "The question for the LLM", true)
+                .AddOption("system_prompt", ApplicationCommandOptionType.String, "The system prompt to use for the response", false);
+
+            var statusCommand = new SlashCommandBuilder()
+                .WithName("status")
+                .WithDescription("Gets the full state of the server");
+
+            List<SlashCommandBuilder> drawCommands = new List<SlashCommandBuilder>();
+            foreach (KeyValuePair<string, ComfyUIFlow> flow in SharedContext.Instance.GetConfig().ComfyUI.Flows)
+            {
+                if (!flow.Value.Visible)
+                    continue; // don't show the flows not tagged as visible, but they still exist for the system to use
                 var flowCommand = new SlashCommandBuilder()
                     .WithName("draw_" + flow.Key)
                     .WithDescription("Generate an image using this flow");
                 //.WithType(ApplicationCommandOptionType.SubCommand)
                 // add each field
                 int fieldCount = 0;
-                foreach (KeyValuePair<string, ComfyUIField> field in flow.Value)
+                foreach (KeyValuePair<string, ComfyUIField> field in flow.Value.Fields)
                 {
                     //var parameterOption = new SlashCommandOptionBuilder()
                     //    .WithName(field.Key)
@@ -935,35 +1268,73 @@ namespace ComputeServerTempMonitor.Discord
                     if (fieldCount >= commandLimit)
                         break;
                 }
-                applicationCommandProperties.Add(flowCommand.Build());
-                //comfyCommands.AddOption(flowCommand);
-                //flowCount++;
-                //if (flowCount >= commandLimit)
-                //    break;
+                drawCommands.Add(flowCommand);
             }
 
-            // user
-            var statusCommand = new SlashCommandBuilder()
-                .WithName("status")
-                .WithDescription("Gets the full state of the server");
-            applicationCommandProperties.Add(statusCommand.Build());
+            foreach (ulong srvId in discordInfo.Servers.Keys)
+            {
+                guildCommands[srvId] = new List<ApplicationCommandProperties>();
+                if (CommandAllowed(srvId, "admin"))
+                {
+                    guildCommands[srvId].Add(loadLLMCommand.Build());
+                }
+
+                if (CommandAllowed(srvId, "hardware"))
+                {
+                    guildCommands[srvId].Add(fansCommand.Build());
+                }
+
+                if (CommandAllowed(srvId, "discord"))
+                {
+                    guildCommands[srvId].Add(regCommand.Build());
+                }
+
+                if (CommandAllowed(srvId, "software"))
+                {
+                    guildCommands[srvId].Add(programControlCommands.Build());
+                }
+
+                if (CommandAllowed(srvId, "users"))
+                {
+                    guildCommands[srvId].Add(usersCommand.Build());
+                }
+
+                if (CommandAllowed(srvId, "chat"))
+                {
+                    guildCommands[srvId].Add(llmChatCommands.Build());
+                    guildCommands[srvId].Add(llmAskCommands.Build());
+                }
+
+                if (CommandAllowed(srvId, "status"))
+                {
+                    guildCommands[srvId].Add(statusCommand.Build());
+                }
+
+                if (CommandAllowed(srvId, "draw"))
+                {
+                    foreach (SlashCommandBuilder flowCommand in drawCommands)
+                    {
+                        guildCommands[srvId].Add(flowCommand.Build());
+                    }
+                }
+            }
 
             try
             {
-                if (discordInfo.OwnerServer != 0)
+                if (updatedGuildId != 0 && guildCommands.Keys.Contains(updatedGuildId))
                 {
-                    var guild = _client.GetGuild(discordInfo.OwnerServer);
-                    await guild.BulkOverwriteApplicationCommandAsync(guildCommandProperties.ToArray());
+                    var guild = _client.GetGuild(updatedGuildId);
+                    await guild.BulkOverwriteApplicationCommandAsync(guildCommands[updatedGuildId].ToArray());
                 }
                 else
                 {
-                    applicationCommandProperties = applicationCommandProperties.Concat(guildCommandProperties).ToList();
+                    foreach (ulong guildId in guildCommands.Keys)
+                    {
+                        var guild = _client.GetGuild(guildId);
+                        await guild.BulkOverwriteApplicationCommandAsync(guildCommands[guildId].ToArray());
+                    }
                 }
-                await _client.BulkOverwriteGlobalApplicationCommandsAsync(applicationCommandProperties.ToArray());
-                //foreach (var acp in applicationCommandProperties)
-                //    await _client.CreateGlobalApplicationCommandAsync(acp);
-                // Using the ready event is a simple implementation for the sake of the example. Suitable for testing and development.
-                // For a production bot, it is recommended to only run the CreateGlobalApplicationCommandAsync() once for each command.
+                await _client.BulkOverwriteGlobalApplicationCommandsAsync(new ApplicationCommandProperties[0]); // clear all global commands
             }
             catch (HttpException exception)
             {

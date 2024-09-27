@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using ComputeServerTempMonitor.ComfyUI.Models;
 using ComputeServerTempMonitor.Software.Models;
 
 namespace ComputeServerTempMonitor.Common
@@ -17,7 +18,7 @@ namespace ComputeServerTempMonitor.Common
         public int GPUCheckingInterval { get; set; } = 5;
         public int CPUCheckingInterval { get; set; } = 5;
         public int FanSpinDownDelay { get; set; } = 3600;
-        public uint DefaultFanSpeed { get; set; } = 50;
+        public uint DefaultFanSpeed { get; set; } = 40;
         public int GPUAutoPerfThreshold { get; set; } = 10;
         public int GPUAutoPerfTimeout { get; set; } = 10;
         public List<FanTempSpeeds> CPULimits { get; set; } = new List<FanTempSpeeds>()
@@ -30,6 +31,7 @@ namespace ComputeServerTempMonitor.Common
 };
         public Dictionary<string, SoftwareRef> Software = new Dictionary<string, SoftwareRef>();
         public ComfyUIConfig ComfyUI { get; set; } = new ComfyUIConfig();
+        public OobaboogaConfig Oobabooga { get; set; } = new OobaboogaConfig();
     }
     public class FanTempSpeeds
     {
@@ -46,10 +48,10 @@ namespace ComputeServerTempMonitor.Common
 
     public class ComfyUIConfig
     {
-        public Dictionary<string, Dictionary<string, ComfyUIField>> Flows { get; set; } = new Dictionary<string, Dictionary<string, ComfyUIField>>();
+        public Dictionary<string, ComfyUIFlow> Flows { get; set; } = new Dictionary<string, ComfyUIFlow>();
         public Dictionary<string, List<string>> Options { get; set; } = new Dictionary<string, List<string>>();
         public string URL { get; set; }
-        public ComfyPathsConfig Paths { get; set; } = new ComfyPathsConfig(); // should populate the list of models from here instead of hard-coding them
+        public ComfyPathsConfig Paths { get; set; } = new ComfyPathsConfig();
         public ComfyUISettings Settings { get; set; }
     }
     public class ComfyPathsConfig

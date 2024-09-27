@@ -13,6 +13,7 @@ namespace ComputeServerTempMonitor.Discord.Models
         public List<ulong> Admins { get; set; } = new List<ulong>();
         public List<ulong> Users { get; set; } = new List<ulong>();
         public Dictionary<PreferenceNames, object> Preferences { get; set; } = new Dictionary<PreferenceNames, object>();
+        public List<string> AllowedCommands { get; set; } = new List<string>();
     }
     public class DiscordMeta
     {
@@ -21,6 +22,7 @@ namespace ComputeServerTempMonitor.Discord.Models
         public List<ulong> GlobalAdmins { get; set; } = new List<ulong>();
         public List<ulong> GlobalUsers { get; set; } = new List<ulong>(); // temporary while I move them all to servers
         public Dictionary<PreferenceNames, object> GlobalPreferences { get; set; } = new Dictionary<PreferenceNames, object>();
+        public List<string> GlobalCommands { get; set; } = new List<string>();
         public Dictionary<ulong, ServerInfo> Servers { get; set; } = new Dictionary<ulong, ServerInfo>();
         public AccessLevel CheckPermission(ulong? server, ulong user)
         {
@@ -78,5 +80,6 @@ namespace ComputeServerTempMonitor.Discord.Models
         ShowUpscaleButton = 2,      // bool
         ShowRegenerateButton = 3,   // bool
         ShowVariationMenu = 4,      // bool
+        CreatePrivateThreads = 5,   // bool
     }
 }

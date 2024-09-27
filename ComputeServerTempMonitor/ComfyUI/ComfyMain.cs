@@ -3,6 +3,7 @@ using ComputeServerTempMonitor.Common;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Net.Http.Json;
+using YamlDotNet.Core.Tokens;
 
 namespace ComputeServerTempMonitor.ComfyUI
 {
@@ -10,7 +11,7 @@ namespace ComputeServerTempMonitor.ComfyUI
     {
         const string FLOW_SUFFIX = "_api.json";
         const string historyFile = "data/comfyHistoryCache.json";
-        const string requestFile = "data/comfyRequestCahge.json";
+        const string requestFile = "data/comfyRequestCache.json";
         static CancellationToken cancellationToken;
         public static int CurrentQueueLength = 0;
 
@@ -93,7 +94,7 @@ namespace ComputeServerTempMonitor.ComfyUI
         private static List<ComfyUIField> GenerateRandoms(string flowName, List<ComfyUIField> replacements, bool nullOnly = true)
         {
             // check config to see if its a Random<> and generate a new random for it
-            foreach (KeyValuePair<string, ComfyUIField> field in SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName])
+            foreach (KeyValuePair<string, ComfyUIField> field in SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields)
             {
                 // we only care about randoms
                 if (field.Value.Type.StartsWith("Random<"))
@@ -106,16 +107,28 @@ namespace ComputeServerTempMonitor.ComfyUI
                     if (type == "Integer")
                     {
                         if (rcf != null)
+                        {
                             rcf.Value = new Random().NextInt64();
+                        }
                         else
-                            replacements.Add(new ComfyUIField(field.Value.NodeTitle, field.Value.Field, new Random().NextInt64()));
+                        {
+                            var f = new ComfyUIField(field.Value.NodeTitle, field.Value.Field, new Random().NextInt64());
+                            f.Type = "Random<Integer>";
+                            replacements.Add(f);
+                        }
                     }
                     else if (type == "Number")
                     {
                         if (rcf != null)
+                        {
                             rcf.Value = new Random().NextSingle();
+                        }
                         else
-                            replacements.Add(new ComfyUIField(field.Value.NodeTitle, field.Value.Field, new Random().NextSingle()));
+                        {
+                            var f = new ComfyUIField(field.Value.NodeTitle, field.Value.Field, new Random().NextSingle());
+                            f.Type = "Random<Number>";
+                            replacements.Add(f);
+                        }
                     }
                 }
             }
@@ -144,18 +157,32 @@ namespace ComputeServerTempMonitor.ComfyUI
             if (images.Count < imageNum)
                 return null;
             ComfyUIField img = new ComfyUIField("Load Image", "image", SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename);
+            img.Type = "Attachment";
             // should this be so hard-coded?
             if (Requests.ContainsKey(id))
             {
                 ComfyUIField vb = new ComfyUIField("BasicScheduler", "denoise", vary_by);
+                vb.Type = "Number";
                 List<ComfyUIField> rep = JsonConvert.DeserializeObject<List<ComfyUIField>>(JsonConvert.SerializeObject(Requests[id].replacements));
                 rep.Add(img);
                 rep.Add(vb);
                 // add all the defaults from the original flow?
                 // how do i find the original flow if its a variation of a variation?
+                if (Requests.ContainsKey(id))
+                {
 
+                    if ((Requests[id].type & FlowModelTypes.flux) == FlowModelTypes.flux)
+                    {
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new flux variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "flux_variation", GenerateRandoms("flux_variation", rep, false));
+                    }
+                    else if ((Requests[id].type & FlowModelTypes.sdxl) == FlowModelTypes.sdxl)
+                    {
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sdxl variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "sdxl_variation", GenerateRandoms("sdxl_variation", rep, false));
+                    }
+                }
                 // image needs to be a link to the one we're upscaling
-                return await EnqueueRequest(userId, "flux_variation", GenerateRandoms("flux_variation", rep, false));
             }
             return null;
         }
@@ -184,20 +211,36 @@ namespace ComputeServerTempMonitor.ComfyUI
             if (images.Count < imageNum)
                 return null;
             ComfyUIField img = new ComfyUIField("Load Image", "image", SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename);
+            img.Type = "Attachment";
             // should this be so hard-coded?
             if (Requests.ContainsKey(id))
             {
                 ComfyUIField ub = new ComfyUIField("Ultimate SD Upscale", "upscale_by", upscale_by);
+                ub.Type = "Number";
                 List<ComfyUIField> rep = JsonConvert.DeserializeObject<List<ComfyUIField>>(JsonConvert.SerializeObject(Requests[id].replacements));
                 rep.Add(img);
                 rep.Add(ub);
                 // image needs to be a link to the one we're upscaling
                 // feed in the default values for the other flow in case they're important?
                 // do we want to do this wholesale?
-                return await EnqueueRequest(userId, "flux_upscale", rep);
+                if (Requests.ContainsKey(id))
+                {
+
+                    if ((Requests[id].type & FlowModelTypes.flux) == FlowModelTypes.flux)
+                    {
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new flux upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "flux_upscale", rep);
+                    }
+                    else if ((Requests[id].type & FlowModelTypes.sdxl) == FlowModelTypes.sdxl)
+                    {
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sdxl upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "full_upscale", rep);
+                    }
+                    
+                }
             }
             // use the basic upscale if we dont have the original model or prompts
-            SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+            SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new basic upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
             return await EnqueueRequest(userId, "basic_upscale", new List<ComfyUIField>()
             {
                 img
@@ -218,9 +261,9 @@ namespace ComputeServerTempMonitor.ComfyUI
             return null;
         }
 
-        public static List<ComfyUIField> GetDefaults(string flowName)
+        public static List<ComfyUIField> FillDefaults(string flowName, List<ComfyUIField> replacements)
         {
-            List<ComfyUIField> defaults = new List<ComfyUIField>();
+            //List<ComfyUIField> defaults = new List<ComfyUIField>();
             if (!File.Exists(SharedContext.Instance.GetConfig().ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX))
             {
                 SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"Flow '{flowName}' not found.");
@@ -233,24 +276,35 @@ namespace ComputeServerTempMonitor.ComfyUI
                 return null;
             }
             // I need to search the flow for any parameter in the config
-            Dictionary<string, ComfyUIField> allParams = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName];
+            Dictionary<string, ComfyUIField> allParams = SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Fields;
             foreach (KeyValuePair<string, Step> pair in loadedFlow)
             {
                 string title = pair.Value._meta["title"];
-                foreach (ComfyUIField field in allParams.Values)
+                foreach (KeyValuePair<string, ComfyUIField> field in allParams)
                 {
-                    if (field.NodeTitle == title)
+                    ComfyUIField? rcf = replacements.Where(x => x.NodeTitle == field.Value.NodeTitle && x.Field == field.Value.Field).FirstOrDefault();
+                    if (rcf != null)
+                        continue; // skip ones we already have values for
+                    if (field.Value.NodeTitle == title)
                     {
                         try
                         {
-                            if (field.Object == "")
+                            if (field.Value.Object == "")
                             {
-                                defaults.Add(new ComfyUIField(title, field.Field, pair.Value.inputs[field.Field], field.Object));
+                                var f = new ComfyUIField(title, field.Value.Field, pair.Value.inputs[field.Value.Field], field.Value.Object);
+                                f.Type = field.Value.Type;
+                                f.Filter = field.Value.Filter;
+                                replacements.Add(f);
                             }
                             else
                             {
                                 // get the whole object as the value?
-                                defaults.Add(new ComfyUIField(title, field.Field, pair.Value.inputs[field.Object], field.Object));
+                                var obj = pair.Value.inputs[field.Value.Object] as JObject;
+                                // peel the one value out of it at a time
+                                var f = new ComfyUIField(title, field.Value.Field, obj[field.Value.Field], field.Value.Object);
+                                f.Type = field.Value.Type;
+                                f.Filter = field.Value.Filter;
+                                replacements.Add(f);
                             }
                         }
                         catch (Exception ex)
@@ -260,7 +314,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                     }
                 }
             }
-            return defaults;
+            return replacements;
         }
 
         public static async Task<HistoryResponse?> EnqueueRequest(string userId, string flowName, List<ComfyUIField> replacements)
@@ -278,6 +332,8 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             // find all Randoms and fill them in if there's none
             replacements = GenerateRandoms(flowName, replacements);
+            // fill in any defaults
+            replacements = FillDefaults(flowName, replacements);
             foreach (KeyValuePair<string, Step> pair in loadedFlow)
             {
                 string title = pair.Value._meta["title"];
@@ -326,9 +382,11 @@ namespace ComputeServerTempMonitor.ComfyUI
                 if (enqueueResponse.prompt_id == null)
                 {
                     SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"No prompt_id returned");
+                    File.WriteAllText("data/errorFlow.json", ps);
                     return null;
                 }
-                Requests.Add(enqueueResponse.prompt_id, new GenerationRequest(flowName, replacements));
+                SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"New prompt accepted {enqueueResponse.prompt_id}");
+                Requests.Add(enqueueResponse.prompt_id, new GenerationRequest(flowName, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Type, replacements));
                 CurrentQueueLength++;
                 // so now we have a successfully queued prompt. we should poll the /history for it periodically
                 Thread.Sleep(1000);

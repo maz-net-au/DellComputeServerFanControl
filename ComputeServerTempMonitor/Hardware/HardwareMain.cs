@@ -11,6 +11,7 @@ using static NvAPIWrapper.Native.GPU.Structures.PrivateFanCoolersControlV1;
 using System.Threading;
 using System.Diagnostics;
 using static System.Net.WebRequestMethods;
+using System.Reflection;
 
 namespace ComputeServerTempMonitor.Hardware
 {
@@ -41,14 +42,14 @@ namespace ComputeServerTempMonitor.Hardware
 
             if (SharedContext.Instance.GetConfig().IPMIPath != "")
             {
-                // on startup, call IPMI commands to disable PCIe card response
-                List<string> result = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00");
-                // set fan manual mode
-
-                result = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x01 0x00");
+                if (!System.Diagnostics.Debugger.IsAttached)
+                {
+                    // on startup, call IPMI commands to disable PCIe card response
+                    List<string> result = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00");
+                    // set fan manual mode
+                    result = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x01 0x00");
+                }
                 // set default rate
-                //result = exec(config.IPMIPath, $"-I {config.IPMIInterface}{config.IPMILogin} raw 0x30 0x30 0x02 0xff 0x{config.DefaultFanSpeed.ToString("x2")}");
-
                 SetChassisFanSpeed(SharedContext.Instance.GetConfig().DefaultFanSpeed);
                 serverStats.ChassisFanSpeedPct = SharedContext.Instance.GetConfig().DefaultFanSpeed;
                 SharedContext.Instance.Log(LogLevel.INFO, "Main", "Chassis fan control set to manual");
@@ -329,6 +330,7 @@ namespace ComputeServerTempMonitor.Hardware
                             //printState(true);
                         }
                         fanDetails["Until"] = new DateTime(serverStats.ChassisFanSpinDownAt).ToString();
+                        Thread.Sleep(3000);
                     }
                     catch (Exception ex)
                     {
@@ -499,7 +501,10 @@ namespace ComputeServerTempMonitor.Hardware
             PhysicalGPUHandle[] handles = GPUApi.EnumTCCPhysicalGPUs();
             if (index < handles.Length)
             {
-                GPUApi.SetForcePstate(handles[index], 8, 2);
+                if (!System.Diagnostics.Debugger.IsAttached)
+                {
+                    GPUApi.SetForcePstate(handles[index], 8, 2);
+                }
                 return true;
             }
             return false;
@@ -509,7 +514,10 @@ namespace ComputeServerTempMonitor.Hardware
             PhysicalGPUHandle[] handles = GPUApi.EnumTCCPhysicalGPUs();
             if (index < handles.Length)
             {
-                GPUApi.SetForcePstate(handles[index], 16, 2);
+                if (!System.Diagnostics.Debugger.IsAttached)
+                {
+                    GPUApi.SetForcePstate(handles[index], 16, 2);
+                }
                 return true;
             }
             return false;
@@ -521,7 +529,10 @@ namespace ComputeServerTempMonitor.Hardware
                 newSpeed = 0;
             if (newSpeed > 100)
                 newSpeed = 100;
-            List<string> result = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x02 0xff 0x{newSpeed.ToString("x2")}");
+            if (!System.Diagnostics.Debugger.IsAttached)
+            {
+                List<string> result = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x02 0xff 0x{newSpeed.ToString("x2")}");
+            }
             serverStats.ChassisFanSpeedPct = newSpeed;
             serverStats.ChassisFanSpinDownAt = DateTime.Now.AddSeconds(SharedContext.Instance.GetConfig().FanSpinDownDelay).Ticks;
             return $"Set fan speed to {newSpeed}%";
@@ -537,7 +548,10 @@ namespace ComputeServerTempMonitor.Hardware
                     try
                     {
                         uint coolerID = GPUApi.GetClientFanCoolersControl(handles[index]).FanCoolersControlEntries.FirstOrDefault().CoolerId;
-                        GPUApi.SetClientFanCoolersControl(handles[index], new PrivateFanCoolersControlV1(new FanCoolersControlEntry[] { new PrivateFanCoolersControlV1.FanCoolersControlEntry(coolerID, NvAPIWrapper.Native.GPU.FanCoolersControlMode.Manual, Math.Min((uint)newSpeed, 100)) }));
+                        if (!System.Diagnostics.Debugger.IsAttached)
+                        {
+                            GPUApi.SetClientFanCoolersControl(handles[index], new PrivateFanCoolersControlV1(new FanCoolersControlEntry[] { new PrivateFanCoolersControlV1.FanCoolersControlEntry(coolerID, NvAPIWrapper.Native.GPU.FanCoolersControlMode.Manual, Math.Min((uint)newSpeed, 100)) }));
+                        }
                         gpuPerf[index].RequestedFanSpeed = newSpeed;
                         return $"GPU_{index} fan speed set to {newSpeed}";
                         //Console.WriteLine("Set card fan speed");
@@ -560,13 +574,22 @@ namespace ComputeServerTempMonitor.Hardware
             {
                 try
                 {
-                    uint coolerID = GPUApi.GetClientFanCoolersControl(ph).FanCoolersControlEntries.FirstOrDefault().CoolerId;
-                    GPUApi.SetClientFanCoolersControl(ph, new PrivateFanCoolersControlV1(new FanCoolersControlEntry[] { new PrivateFanCoolersControlV1.FanCoolersControlEntry(coolerID, NvAPIWrapper.Native.GPU.FanCoolersControlMode.Auto, 50) }));
+                    if (!System.Diagnostics.Debugger.IsAttached)
+                    {
+                        uint coolerID = GPUApi.GetClientFanCoolersControl(ph).FanCoolersControlEntries.FirstOrDefault().CoolerId;
+                        GPUApi.SetClientFanCoolersControl(ph, new PrivateFanCoolersControlV1(new FanCoolersControlEntry[] { new PrivateFanCoolersControlV1.FanCoolersControlEntry(coolerID, NvAPIWrapper.Native.GPU.FanCoolersControlMode.Auto, 50) }));
+
+                        // set their performance mode back to whatever
+                        GPUApi.SetForcePstate(ph, 16, 2);
+                    }
                 }
                 catch (Exception ex) { }
             }
-            SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x01 0x01");
-            SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00");
+            if (!System.Diagnostics.Debugger.IsAttached)
+            {
+                SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x01 0x01");
+                SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00");
+            }
             SharedContext.Instance.Log(LogLevel.INFO, "HardwareMain", "Disabled manual control and restored PCIe cooling response.");
         }
     }
