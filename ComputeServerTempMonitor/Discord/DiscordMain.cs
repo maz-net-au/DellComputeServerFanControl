@@ -20,6 +20,8 @@ using ComputeServerTempMonitor.Oobabooga;
 using ComputeServerTempMonitor.Oobabooga.Models;
 using System.Reactive;
 using System.Reflection;
+using System.Security.Cryptography;
+using Discord.Interactions;
 
 namespace ComputeServerTempMonitor.Discord
 {
@@ -44,12 +46,46 @@ namespace ComputeServerTempMonitor.Discord
             _client.ButtonExecuted += ButtonExecuted;
             _client.SelectMenuExecuted += SelectMenuExecuted;
             _client.MessageReceived += MessageReceived;
+            _client.ModalSubmitted += ModalSubmitted;
             _client.MessageUpdated += MessageUpdated;
             _client.MessageDeleted += MessageDeleted;
             _client.ThreadDeleted += ThreadDeleted;
             _client.ThreadUpdated += ThreadUpdated;
             await _client.LoginAsync(TokenType.Bot, SharedContext.Instance.GetConfig().DiscordBotToken);
             await _client.StartAsync();
+        }
+
+        private static async Task ModalSubmitted(SocketModal arg)
+        {
+            try
+            {
+                string eventId = arg.Data.CustomId;
+                string[] parts = arg.Data.CustomId.Split(":");
+                List<string> args = new List<string>();
+                if (parts.Length >= 2)
+                {
+                    args = parts[1].Split(",").ToList(); // thread ID, message ID (usually)
+                }
+                switch (parts[0])
+                {
+                    case "llmedit":
+                        {
+                            string new_message = arg.Data.Components.ToList().FirstOrDefault(x => x.CustomId == "new_message")?.Value;
+                            if (arg.Channel is SocketThreadChannel threadChannel &&  new_message != null && new_message != "")
+                            {
+                                await threadChannel.ModifyMessageAsync(ulong.Parse(args[1]), s => s.Content = new_message);
+                                SharedContext.Instance.Log(LogLevel.INFO, "Discord.Modal", "Message content updated");
+                                await arg.RespondAsync("Content Updated", null, false, true);
+                                await arg.DeleteOriginalResponseAsync();// this might only work if not ephemeral
+                            }
+                        }
+                        return;
+                }
+            }
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Discord.Modal", "An exception occurred while handling a modal interaction:\n" + ex.ToString());
+            }
         }
 
         private static async Task ThreadUpdated(Cacheable<SocketThreadChannel, ulong> arg1, SocketThreadChannel arg2)
@@ -149,217 +185,315 @@ namespace ComputeServerTempMonitor.Discord
 
         private static async Task SelectMenuExecuted(SocketMessageComponent arg)
         {
-            string[] parts = arg.Data.CustomId.Split(":");
-            if (parts.Length != 2)
+            try
             {
-                await arg.RespondAsync($"Invalid command");
-                return;
-            }
-            string guildName = "";
-            if (arg.GuildId.HasValue)
-            {
-                SocketGuild guild = _client.GetGuild(arg.GuildId.Value);
-                guildName = guild.Name;
-            }
-            WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
-            switch (parts[0])
-            {
-                case "upscale":
-                    {
-                        Task.Run(async () =>
+                string[] parts = arg.Data.CustomId.Split(":");
+                if (parts.Length != 2)
+                {
+                    await arg.RespondAsync($"Invalid command");
+                    return;
+                }
+                string guildName = "";
+                if (arg.GuildId.HasValue)
+                {
+                    SocketGuild guild = _client.GetGuild(arg.GuildId.Value);
+                    guildName = guild.Name;
+                }
+                WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
+                switch (parts[0])
+                {
+                    case "upscale":
                         {
-                            if (arg.ChannelId == null)
-                                await arg.RespondAsync("Request failed");
-                            IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
-                            if (chan == null)
+                            Task.Run(async () =>
                             {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Upscale", "Channel not found");
-                                await arg.RespondAsync("Request failed");
-                            }
-                            //int num;
-                            //if (!int.TryParse(parts[1], out num))
-                            //    return;
-                            float upscale_by = 2.0f; // default
-                            if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out upscale_by))
-                                return;
-                            await arg.RespondAsync($"{upscale_by}x upscale request accepted.\n{GetDrawStatus()}");
-                            HistoryResponse? hr = await ComfyMain.Upscale(parts[1], 0, upscale_by, arg.User.Username);
-                            if (hr == null)
-                            {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Upscale", "Result is null");
-                                await chan.SendMessageAsync("Request failed");
-                            }
-                            else
-                            {
-                                DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
-                                uint filesize = 0;
-                                uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
-                                if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
+                                if (arg.ChannelId == null)
+                                    await arg.RespondAsync("Request failed");
+                                IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
+                                if (chan == null)
                                 {
-                                    await arg.ModifyOriginalResponseAsync((s) =>
-                                    {
-                                        s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Upscale", "Channel not found");
+                                    await arg.RespondAsync("Request failed");
+                                }
+                                //int num;
+                                //if (!int.TryParse(parts[1], out num))
+                                //    return;
+                                float upscale_by = 2.0f; // default
+                                if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out upscale_by))
+                                    return;
+                                await arg.RespondAsync($"{upscale_by}x upscale request accepted.\n{GetDrawStatus()}");
+                                HistoryResponse? hr = await ComfyMain.Upscale(parts[1], 0, upscale_by, arg.User.Username);
+                                if (hr == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Upscale", "Result is null");
+                                    await chan.SendMessageAsync("Request failed");
                                 }
                                 else
                                 {
-                                    await arg.ModifyOriginalResponseAsync((s) =>
+                                    DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
+                                    uint filesize = 0;
+                                    uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
+                                    if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
                                     {
-                                        s.Content = $"Here is your upscaled image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
-                                        s.Attachments = res.Attachments;
-                                        s.Components = res.Components.Build();
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    else
+                                    {
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Here is your upscaled image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
+                                            s.Attachments = res.Attachments;
+                                            s.Components = res.Components.Build();
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    //await chan.SendFilesAsync(res.Attachments, $"I made it bigger for you {arg.User.Mention}", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
                                 }
-                                //await chan.SendFilesAsync(res.Attachments, $"I made it bigger for you {arg.User.Mention}", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
-                            }
-                        });
-                    }
-                    break;
-                case "variation":
-                    {
-                        Task.Run(async () =>
+                            });
+                        }
+                        break;
+                    case "variation":
                         {
-                            if (arg.Data.Values.Count == 0)
+                            Task.Run(async () =>
                             {
-                                // explicitly deselected. Do nothing.
-                                await arg.RespondAsync("Selection cleared");
-                                await arg.DeleteOriginalResponseAsync();
-                            }
-                            if (arg.ChannelId == null)
-                                await arg.RespondAsync("Request failed");
-                            IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
-                            if (chan == null)
-                            {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Button", "Channel not found");
-                                await arg.RespondAsync("Request failed");
-                            }
-                            float vary_by = 0.5f; // default
-                            if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out vary_by))
-                                return;
-                            await arg.RespondAsync($"{Math.Round(vary_by * 100)}% variation request accepted.\n{GetDrawStatus()}");
-                            HistoryResponse? hr = await ComfyMain.Variation(parts[1], 0, vary_by, arg.User.Username);
-                            if (hr == null)
-                            {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
-                                await chan.SendMessageAsync("Request failed");
-                            }
-                            else
-                            {
-                                DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
-                                uint filesize = 0;
-                                uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
-                                if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
+                                if (arg.Data.Values.Count == 0)
                                 {
-                                    await arg.ModifyOriginalResponseAsync((s) =>
-                                    {
-                                        s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                    // explicitly deselected. Do nothing.
+                                    await arg.RespondAsync("Selection cleared");
+                                    await arg.DeleteOriginalResponseAsync();
+                                }
+                                if (arg.ChannelId == null)
+                                    await arg.RespondAsync("Request failed");
+                                IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
+                                if (chan == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Channel not found");
+                                    await arg.RespondAsync("Request failed");
+                                }
+                                float vary_by = 0.5f; // default
+                                if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out vary_by))
+                                    return;
+                                await arg.RespondAsync($"{Math.Round(vary_by * 100)}% variation request accepted.\n{GetDrawStatus()}");
+                                HistoryResponse? hr = await ComfyMain.Variation(parts[1], 0, vary_by, arg.User.Username);
+                                if (hr == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
+                                    await chan.SendMessageAsync("Request failed");
                                 }
                                 else
                                 {
-                                    await arg.ModifyOriginalResponseAsync((s) =>
+                                    DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
+                                    uint filesize = 0;
+                                    uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
+                                    if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
                                     {
-                                        s.Content = $"Here is your variation {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
-                                        s.Attachments = res.Attachments;
-                                        s.Components = res.Components.Build();
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    else
+                                    {
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Here is your variation {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
+                                            s.Attachments = res.Attachments;
+                                            s.Components = res.Components.Build();
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    //await chan.SendFilesAsync(res.Attachments, $"I made it bigger for you {arg.User.Mention}", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
                                 }
-                                //await chan.SendFilesAsync(res.Attachments, $"I made it bigger for you {arg.User.Mention}", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
-                            }
-                        });
-                    }
-                    break;
-                default:
-                    {
-                        await arg.RespondAsync($"Unknown select menu: {arg.Data.CustomId}");
-                    }
-                    break;
+                            });
+                        }
+                        break;
+                    default:
+                        {
+                            await arg.RespondAsync($"Unknown select menu: {arg.Data.CustomId}");
+                        }
+                        break;
+                }
+                    // move upscale here as well?
             }
-            // move upscale here as well?
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Discord.Menu", "An exception occurred while handling a menu interaction:\n" + ex.ToString());
+            }
         }
 
         private static async Task ButtonExecuted(SocketMessageComponent arg)
         {
-            string[] parts = arg.Data.CustomId.Split(":");
-            if (parts.Length != 2)
+            try
             {
-                await arg.RespondAsync($"Invalid command");
-                return;
-            }
-            string[] args = parts[1].Split(",");
-            if (discordInfo.CheckPermission(arg.GuildId, arg.User.Id) == AccessLevel.None)
-            {
-                await arg.RespondAsync($"Button '{parts[0]}' not allowed.");
-                return; // failed
-            }
-            string guildName = "";
-            if (arg.GuildId.HasValue)
-            {
-                SocketGuild guild = _client.GetGuild(arg.GuildId.Value);
-                guildName = guild.Name;
-            }
-            WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
-            switch (parts[0])
-            {
-                case "continue":
-                    {
-                        await arg.RespondAsync("Not implemented yet");
-                    }
-                    break;
-                case "regenerate":
-                    {
-                        Task.Run(async () =>
+                string[] parts = arg.Data.CustomId.Split(":");
+                if (parts.Length != 2)
+                {
+                    await arg.RespondAsync($"Invalid command");
+                    return;
+                }
+                string[] args = parts[1].Split(",");
+                if (discordInfo.CheckPermission(arg.GuildId, arg.User.Id) == AccessLevel.None)
+                {
+                    await arg.RespondAsync($"Button '{parts[0]}' not allowed.");
+                    return; // failed
+                }
+                string guildName = "";
+                if (arg.GuildId.HasValue)
+                {
+                    SocketGuild guild = _client.GetGuild(arg.GuildId.Value);
+                    guildName = guild.Name;
+                }
+                WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
+                switch (parts[0])
+                {
+                    case "continue":
                         {
-                            if (arg.ChannelId == null)
-                                await arg.RespondAsync("Request failed");
-                            IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
-                            if (chan == null)
+                            Task.Run(async () =>
                             {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Button", "Channel not found");
-                                await arg.RespondAsync("Request failed");
-                            }
-                            await arg.RespondAsync($"Regenerate request accepted.\n{GetDrawStatus()}");
-                            HistoryResponse? hr = await ComfyMain.Regenerate(args[0], arg.User.Username);
-                            if (hr == null)
+                                ulong tId = ulong.Parse(args[0]);
+                                ulong msgId = ulong.Parse(args[1]);
+                                if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, tId) != null)
+                                    await OobaboogaMain.Continue(tId, msgId, arg.User.GlobalName);
+                                await arg.RespondAsync("Continued", null, false, true);
+                                await arg.DeleteOriginalResponseAsync();
+                            }, cancellationToken);
+                        }
+                        return;
+                    case "stop":
+                        {
+                            Task.Run(async () =>
                             {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
-                                await chan.SendMessageAsync("Request failed");
-                            }
-                            else
+                                ulong tId = ulong.Parse(args[0]);
+                                if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, tId) != null)
+                                    await OobaboogaMain.Stop(tId, arg.User.GlobalName);
+                                await arg.RespondAsync("Stopped", null, false, true);
+                                await arg.DeleteOriginalResponseAsync();
+                            }, cancellationToken);
+                        }
+                        return;
+                    case "deletemsg":
+                        {
+                            Task.Run(async () =>
                             {
-                                DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
-                                uint filesize = 0;
-                                uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
-                                if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
+                                ulong tId = ulong.Parse(args[0]);
+                                ulong msgId = ulong.Parse(args[1]);
+                                if (arg.Channel is SocketThreadChannel threadChannel)
                                 {
-                                    await arg.ModifyOriginalResponseAsync((s) =>
+                                    if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, threadChannel.Id) != null)
+                                        await threadChannel.DeleteMessageAsync(msgId);
+                                }
+                                await arg.RespondAsync("Message Deleted", null, false, true);
+                                await arg.DeleteOriginalResponseAsync();
+                            }, cancellationToken);
+                        }
+                        return;
+                    case "delete":
+                        {
+                            Task.Run(async () =>
+                            {
+                                if (arg.Channel is SocketThreadChannel threadChannel)
+                                {
+                                    if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, threadChannel.Id) != null)
+                                        await threadChannel.DeleteAsync();
+                                }
+                            }, cancellationToken);
+                        }
+                        return;
+                    case "llmregenerate":
+                        {
+                            Task.Run(async () =>
+                            {
+                                ulong tId = ulong.Parse(args[0]);
+                                ulong msgId = ulong.Parse(args[0]);
+                                if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, tId) != null)
+                                    await OobaboogaMain.Regenerate(tId, msgId, arg.User.GlobalName);
+                                await arg.RespondAsync("Regenerated", null, false, true);
+                                await arg.DeleteOriginalResponseAsync();
+                            }, cancellationToken);
+                        }
+                        return;
+                    case "edit":
+                        {
+                            // check message exists by ID
+                            if (arg.Channel is SocketThreadChannel threadChannel)
+                            {
+
+                                IMessage msg = await threadChannel.GetMessageAsync(ulong.Parse(args[1]));
+                                if (msg != null)
+                                {
+                                    Task.Run(async () =>
                                     {
-                                        s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                        // show a modal with the text of the bot's reply in it. then write an update back to that message
+                                        ModalBuilder mb = new ModalBuilder()
+                                            .WithTitle("Edit message")
+                                            .WithCustomId($"llmedit:{args[0]},{args[1]}")
+                                            .AddTextInput("Message", "new_message", TextInputStyle.Paragraph, "", null, null, true, msg.Content);
+                                        await arg.RespondWithModalAsync(mb.Build());
+                                    }, cancellationToken);
+                                }
+                            }
+
+                        }
+                        return;
+                    case "regenerate":
+                        {
+                            Task.Run(async () =>
+                            {
+                                if (arg.ChannelId == null)
+                                    await arg.RespondAsync("Request failed");
+                                IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
+                                if (chan == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Channel not found");
+                                    await arg.RespondAsync("Request failed");
+                                }
+                                await arg.RespondAsync($"Regenerate request accepted.\n{GetDrawStatus()}");
+                                HistoryResponse? hr = await ComfyMain.Regenerate(args[0], arg.User.Username);
+                                if (hr == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
+                                    await chan.SendMessageAsync("Request failed");
                                 }
                                 else
                                 {
-                                    await arg.ModifyOriginalResponseAsync((s) =>
+                                    DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
+                                    uint filesize = 0;
+                                    uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
+                                    if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
                                     {
-                                        s.Content = $"Here is your regenerated image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
-                                        s.Attachments = res.Attachments;
-                                        s.Components = res.Components.Build();
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    else
+                                    {
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Here is your regenerated image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
+                                            s.Attachments = res.Attachments;
+                                            s.Components = res.Components.Build();
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    //await chan.SendFilesAsync(res.Attachments, $"Is this version better {arg.User.Mention}?", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
                                 }
-                                //await chan.SendFilesAsync(res.Attachments, $"Is this version better {arg.User.Mention}?", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
-                            }
-                        });
-                    }
-                    break;
-                default:
-                    await arg.RespondAsync($"Unknown command");
-                    break;
+                            });
+                        }
+                        break;
+                    default:
+                        await arg.RespondAsync($"Unknown command");
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Discord.Button", "An exception occurred while handling a button interaction:\n" + ex.ToString());
             }
         }
 
@@ -467,17 +601,28 @@ namespace ComputeServerTempMonitor.Discord
 
         private static async Task MessageDeleted(Cacheable<IMessage, ulong> arg1, Cacheable<IMessageChannel, ulong> arg2)
         {
-            throw new NotImplementedException();
-            // check its a thread with an LLM attached
-            // so i need to find the message in my context and remove it? 
-        }
+        ChatHistory ch = OobaboogaMain.FindExistingChat(null, arg2.Id);
+        if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && !SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersParticipate && ch == null)
+            return;
+        Task.Run(async () =>
+        {
+            await OobaboogaMain.DeleteMessage(arg2.Id, arg1.Id);
+            // replace by ID?
+            SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM thread message delete received.");
+        }, cancellationToken);
+        // check its a thread with an LLM attached
+        // so i need to find the message in my context and remove it? 
+    }
 
         private static async Task MessageUpdated(Cacheable<IMessage, ulong> arg1, SocketMessage arg2, ISocketMessageChannel arg3)
         {
             // i think arg3 is the thread? maybe? check?
             if (arg2.Type == MessageType.Default && arg3 is SocketThreadChannel threadChannel)
             {
-                if (OobaboogaMain.FindExistingChat(arg2.Author.GlobalName, threadChannel.Id) == null)
+                ChatHistory ch = OobaboogaMain.FindExistingChat(arg2.Author.GlobalName, threadChannel.Id);
+                if (ch != null && ch.IsGenerating)
+                    return;
+                if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && !SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersParticipate && ch == null)
                     return;
                 Task.Run(async () =>
                 {
@@ -488,34 +633,72 @@ namespace ComputeServerTempMonitor.Discord
                     else
                     {
                         // replace by ID?
-                        SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM thread message edit received from {arg2.Author.GlobalName}.");
+                        SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM thread message edit received from {arg2.Author.GlobalName ?? arg2.Author.Username}.");
                         await OobaboogaMain.Replace(arg3.Id, arg2.Id, arg2.Content);
                     }
                 }, cancellationToken);
             }
             // check its a thread with an LLM attached
             // if i update the context, the next generation will take that into account?
-            throw new NotImplementedException();
+            //throw new NotImplementedException();
         }
 
-        public static async Task<ulong> SendThreadMessage(ulong tId, string msg, ulong? updateMsgId)
+        public static async Task<ulong> SendThreadMessage(ulong tId, string msg, ulong? updateMsgId, bool finished = false)
         {
+            if (msg == null || msg == "" || msg.Trim() == "")
+                msg = ".";
+            ComponentBuilder cb = new ComponentBuilder();
+            ActionRowBuilder arb = new ActionRowBuilder();
+            if (finished)
+            {
+                // add regen, remove, edit buttons
+                ButtonBuilder bbreg = new ButtonBuilder($"Regen", $"llmregenerate:{tId},{updateMsgId}", ButtonStyle.Primary, null, new Emoji("♻"), false, null);
+                ButtonBuilder bbcont = new ButtonBuilder($"Cont.", $"continue:{tId},{updateMsgId}", ButtonStyle.Success, null, new Emoji("➡"), false, null);
+                ButtonBuilder bbedit = new ButtonBuilder($"Edit", $"edit:{tId},{updateMsgId}", ButtonStyle.Secondary, null, new Emoji("✂"), false, null);
+                ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{tId},{updateMsgId}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
+                arb.AddComponent(bbreg.Build());
+                arb.AddComponent(bbcont.Build());
+                arb.AddComponent(bbedit.Build());
+                arb.AddComponent(bbdel.Build());
+            }
+            else
+            {
+                ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
+                arb.AddComponent(bbredo.Build());
+            }
+            cb.AddRow(arb);
+
             var channel = _client.GetChannel(tId);
             if (channel is SocketThreadChannel threadChannel)
             {
+                if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.RemovePreviousControls && finished)
+                {
+                    var messages = await threadChannel.GetMessagesAsync(10).FlattenAsync();
+                    foreach (var message in messages)
+                    {
+                        // skip the one we're working on
+                        if (message.Id == updateMsgId)
+                        {
+                            continue;
+                        }
+                        if(_client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id)
+                            await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = new ComponentBuilder().Build(); });
+                    }
+                }
                 if (updateMsgId.HasValue)
                 {
-                     IMessage oldMsg = await threadChannel.GetMessageAsync(updateMsgId.Value);
+                    IMessage oldMsg = await threadChannel.GetMessageAsync(updateMsgId.Value);
                     if (oldMsg != null)
                     {
-                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => { m.Content = msg; });
+                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => { m.Content = msg; m.Components = cb.Build(); });
                         return updateMsgId.Value;
                     }
                 }
-                // also, remove all components on all existing messages in the thread?
-                // this is where we'd add all the components
-                var res = await threadChannel.SendMessageAsync(msg);
-                return res.Id;
+                else
+                {
+                    var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, cb.Build());
+                    return res.Id;
+                }
             }
             return 0;
         }
@@ -529,7 +712,7 @@ namespace ComputeServerTempMonitor.Discord
                 if (arg.Channel is SocketThreadChannel threadChannel)
                 {
                     // only the correct user can send messages to their instance of a thread
-                    if (OobaboogaMain.FindExistingChat(arg.Author.GlobalName, threadChannel.Id) == null)
+                    if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && OobaboogaMain.FindExistingChat(arg.Author.GlobalName, threadChannel.Id) == null)
                         return;
                     Task.Run(async () =>
                     {
@@ -542,13 +725,7 @@ namespace ComputeServerTempMonitor.Discord
                             else
                             {
                                 SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM reply received from {arg.Author.GlobalName}.");
-                                LLMResponse res = await OobaboogaMain.Reply(arg.Channel.Id, arg.Id, arg.Content);
-                                if (res != null)
-                                {
-                                    AddLLMUsage(arg.Author.GlobalName, res.PromptTokens, res.CompletionTokens);
-                                    await threadChannel.SendMessageAsync(res.Message); // store the ID of this message against my 
-                                }
-                                else
+                                if (!await OobaboogaMain.Reply(arg.Channel.Id, arg.Id, arg.Content))
                                 {
                                     await threadChannel.SendMessageAsync("This conversation has ended.");
                                 }
@@ -705,7 +882,7 @@ namespace ComputeServerTempMonitor.Discord
                             if (command.Channel is SocketTextChannel textChannel)
                             {
                                 ChatHistory ch = OobaboogaMain.FindExistingChat(command.User.GlobalName);
-                                if (ch != null)
+                                if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowMultipleConversations && ch != null)
                                 {
                                     // check if it exists
                                     var g = _client.GetGuild(ch.ServerId);
@@ -745,12 +922,16 @@ namespace ComputeServerTempMonitor.Discord
                                         //}
                                         if (res.Greeting != null && res.Greeting != "")
                                         {
+                                            // a button to delete the thread
                                             ComponentBuilder cb = new ComponentBuilder();
                                             ActionRowBuilder arb = new ActionRowBuilder();
-                                            ButtonBuilder bbredo = new ButtonBuilder($"Continue", $"continue", ButtonStyle.Primary, null, new Emoji("➡"), false, null);
-                                            arb.AddComponent(bbredo.Build());
+                                                // add regen, remove, edit buttons
+                                            ButtonBuilder bbdel = new ButtonBuilder($"Delete Thread", $"delete:{stc.Id}", ButtonStyle.Danger, null, new Emoji("❌"), false, null);
+                                            arb.AddComponent(bbdel.Build());
                                             cb.AddRow(arb);
+
                                             await stc.SendMessageAsync(res.Greeting, false, null, null, null, null, cb.Build());
+
                                         }
                                         await command.DeleteOriginalResponseAsync();
                                     }

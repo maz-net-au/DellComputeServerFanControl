@@ -20,6 +20,7 @@ namespace ComputeServerTempMonitor.Oobabooga.Models
     {
         public string finish_reason { get; set; }
         public int index { get; set; }
+        public Message delta { get; set; }
         public Message message { get; set; }
         public object logprobs { get; set; }
     }

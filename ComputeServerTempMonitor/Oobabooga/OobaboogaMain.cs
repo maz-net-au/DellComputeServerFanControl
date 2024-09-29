@@ -125,7 +125,7 @@ namespace ComputeServerTempMonitor.Oobabooga
             {
                 if (CurrentChats[id].IsGenerating)
                 {
-                    await StopChat(id); // kill the current request
+                    await Stop(id, CurrentChats[id].Username); // kill the current request
                 }
                 CurrentChats.Remove(id);
                 WriteHistory();
@@ -142,36 +142,6 @@ namespace ComputeServerTempMonitor.Oobabooga
                 }
             }
             return null;
-        }
-
-
-        //public static async Task<LLMResponse> StartChat(string character, ulong userId, string system, string prompt, ulong id) // do we allow settings? should i have preset support?
-        //{
-        //    if (userId == 0 || CurrentModel == "")
-        //    {
-        //        SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", "User or current model is blank");
-        //        return null;
-        //    }
-        //    ChatHistory chatHistory = new ChatHistory();
-        //    // let the discord module deal with making the thread etc. this one simply runs generation
-        //    // i probably need to store a uuid for the chat, the thread Id, the guild/server, the user who started it, total context length
-        //    OpenAIChatRequest request = new OpenAIChatRequest();
-        //    request.model = CurrentModel;
-        //    // where do i get the system prompt? do I have to do that manually?
-        //    request.character = character;
-        //    request.name2 = "You";
-        //    if (system != "")
-        //        request.messages.Add(new OpenAIMessage(Roles.system, system));
-        //    request.messages.Add(new OpenAIMessage(Roles.user, prompt));
-        //    request.truncation_length = 16000;
-        //    HttpResponseMessage response = await hc.PostAsJsonAsync(SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/chat/completions", request);
-        //    OpenAIChatResponse res = await response.Content.ReadFromJsonAsync<OpenAIChatResponse>();
-        //    return new LLMResponse(res);
-        //}
-
-        public static async Task StopChat(ulong id) // does this return the message so far? or does that come out from the request above?
-        {
-            HttpResponseMessage response = await hc.PostAsJsonAsync(SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/internal/stop-generation", new object());
         }
 
         public static async Task<uint> GetTokenCount(string msg)
@@ -203,30 +173,13 @@ namespace ComputeServerTempMonitor.Oobabooga
             return total;
         }
 
-        public static async Task Replace(ulong id, ulong msgId, string replacementText) // replace the bot's last reply. or by ID
-        {
-
-        }
-
-        public static async Task Update(ulong id, ulong msgId, string newText) // replace the your own last reply and regenerate
-        {
-
-        }
-
-        public static async Task Regenerate(ulong id) // regenerate the bot's last reply
-        {
-            // trim the last "assistant" type message, and get the message before to send to reply?
-        }
-
-
-
         public static async Task<LLMResponse> Ask(string prompt, string system) // do we allow settings? should i have preset support?
         {
             try
             {
                 if (CurrentModel == "")
                 {
-                    SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", "Current model is blank");
+                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Ask", "Current model is blank");
                     return null;
                 }
                 // let the discord module deal with making the thread etc. this one simply runs generation
@@ -236,7 +189,7 @@ namespace ComputeServerTempMonitor.Oobabooga
                 request.character = "BetterAssistant";
                 request.name1 = "You";
                 request.name2 = "BetterAssistant";
-                request.max_tokens = (uint)(SharedContext.Instance.GetConfig().Oobabooga.DefaultParams?["max_new_tokens"] ?? 512);
+                request.max_tokens = SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.MaxNewTokens;
                 if (system != "")
                 {
                     request.context = system;
@@ -249,7 +202,7 @@ namespace ComputeServerTempMonitor.Oobabooga
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", ex.ToString());
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Ask", ex.ToString());
             }
             return new LLMResponse();
         }
@@ -288,84 +241,284 @@ namespace ComputeServerTempMonitor.Oobabooga
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", ex.ToString());
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Init", ex.ToString());
             }
             return null;
         }
-        public static async Task<LLMResponse> Continue(ulong id, string username)
+        public static async Task Continue(ulong id, ulong msgId, string username)
         {
             if (!CurrentChats.ContainsKey(id))
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", "Conversation not found.");
-                return null;
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Continue", "Conversation not found.");
+                return;
             }
-            if (CurrentChats[id].Username != username)
+            if (CurrentChats[id].Username != username && !SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl)
             {
-                return null;
+                return;
             }
             try
             {
                 OpenAIChatRequest request = new OpenAIChatRequest(CurrentChats[id]);
                 request.continue_ = true;
                 CurrentChats[id].LastMessage = DateTime.Now;
-                CurrentChats[id].IsGenerating = true;
-                HttpResponseMessage response = await hc.PostAsJsonAsync(SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/chat/completions", request);
-                CurrentChats[id].IsGenerating = false;
-                OpenAIChatResponse res = await response.Content.ReadFromJsonAsync<OpenAIChatResponse>();
-                LLMResponse llmr = new LLMResponse(res);
-                if (CurrentChats.ContainsKey(id))
-                {
-                    CurrentChats[id].Messages[CurrentChats[id].Messages.Count-1] = new OpenAIMessage(Roles.assistant, llmr.Message, llmr.CompletionTokens); // does this replace?
-                    CurrentChats[id].TokenCount = llmr.TokenCount; // await TokenCount(CurrentChats[id]);
-                    await WriteHistory();
-                }
-                return llmr;
+                await Infer(request, id, msgId);
+
+                return;
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", ex.ToString());
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Continue", ex.ToString());
             }
-            return null;
+            return;
         }
-        public static async Task<LLMResponse> Reply(ulong id, ulong msgId, string message)
+
+        public static async Task<bool> Reply(ulong id, ulong msgId, string message)
         {
             try
             {
                 if (!CurrentChats.ContainsKey(id))
                 {
-                    SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", "Conversation not found.");
-                    return null;
+                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Reply", "Conversation not found.");
+                    return false;
                 }
                 CurrentChats[id].Messages.Add(new OpenAIMessage(Roles.user, message, msgId));
-                OpenAIChatRequest request = new OpenAIChatRequest(CurrentChats[id]);
                 CurrentChats[id].LastMessage = DateTime.Now;
-                CurrentChats[id].IsGenerating = true;
-                //Console.WriteLine(JsonConvert.SerializeObject(request));
-                HttpResponseMessage response = await hc.PostAsJsonAsync(SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/chat/completions", request);
-                //Console.WriteLine();
-                //Console.WriteLine(JsonConvert.SerializeObject(response));
-                CurrentChats[id].IsGenerating = false;
-                if (!response.IsSuccessStatusCode)
-                {
-                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Reply", $"Reveived status code: {response.StatusCode}");
-                    return new LLMResponse();
-                }
-                OpenAIChatResponse res = await response.Content.ReadFromJsonAsync<OpenAIChatResponse>();
-                LLMResponse llmr = new LLMResponse(res);
-                if (CurrentChats.ContainsKey(id))
-                {
-                    CurrentChats[id].Messages.Add(new OpenAIMessage(Roles.assistant, llmr.Message, llmr.CompletionTokens));
-                    CurrentChats[id].TokenCount = llmr.TokenCount; // await TokenCount(CurrentChats[id]);
-                    await WriteHistory();
-                }
-                return llmr;
+                // make a new request to send
+                OpenAIChatRequest request = new OpenAIChatRequest(CurrentChats[id]);
+                await Infer(request, id, null);
+                return true;
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", ex.ToString());
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Reply", ex.ToString());
             }
-            return null;
+            return false;
         }
 
+        public static async Task Replace(ulong id, ulong msgId, string replacementText)
+        {
+            if (!CurrentChats.ContainsKey(id))
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Replace", "Conversation not found.");
+                return;
+            }
+            OpenAIMessage oim = CurrentChats[id].Messages.FirstOrDefault(x => x.msgId == msgId);
+            if (oim != null)
+            {
+                oim.content = replacementText;
+                oim.tokens = 0;
+                await WriteHistory();
+            }
+            else
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Replace", "Message not found.");
+            }
+        }
+
+        public static async Task DeleteMessage(ulong id, ulong msgId)
+        {
+            if (!CurrentChats.ContainsKey(id))
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Delete", "Conversation not found.");
+                return;
+            }
+            OpenAIMessage oim = CurrentChats[id].Messages.FirstOrDefault(x => x.msgId == msgId);
+            if (oim != null)
+            {
+                CurrentChats[id].Messages.Remove(oim);
+                await WriteHistory();
+            }
+            else
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Delete", "Message not found.");
+            }
+        }
+
+        public static async Task Regenerate(ulong id, ulong msgId, string username) // regenerate the specified message
+        {
+            // find the chat
+            // find the message
+            // if the message isn't the last, carve the rest off and store
+            // trigger a generation for the missing message, updating by ID
+            // once finished, put the rest of the messages back
+            // write cache
+            if (!CurrentChats.ContainsKey(id))
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Regenerate", "Conversation not found.");
+                return;
+            }
+            List<OpenAIMessage> laterMessages = new List<OpenAIMessage>();
+            try
+            {
+                laterMessages = await Trim(id, msgId);
+                if (laterMessages == null)
+                {
+                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Regenerate", "Message not found.");
+                    return;
+                }
+                // remove the one we're replacing as well
+                CurrentChats[id].Messages.RemoveAt(CurrentChats[id].Messages.Count - 1);
+                OpenAIChatRequest request = new OpenAIChatRequest(CurrentChats[id]);
+                // pass in the ID to update the existing message
+                await Infer(request, id, msgId);
+            }
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Regenerate", ex.ToString());
+            }
+            finally
+            {
+                // put the removed messages back
+                if (laterMessages != null)
+                {
+                    laterMessages.Reverse();
+                    CurrentChats[id].Messages = CurrentChats[id].Messages.Concat(laterMessages).ToList();
+                }
+            }
+        }
+
+        public static async Task Stop(ulong id, string username) // does this return the message so far? or does that come out from the request above?
+        {
+            if (!CurrentChats.ContainsKey(id))
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Stop", "Conversation not found.");
+                return;
+            }
+            if (CurrentChats[id].Username != username && !SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl)
+            {
+                // only let the user that started the chat kill it
+                return;
+            }
+            if (CurrentChats[id].IsGenerating)
+            {
+                HttpResponseMessage response = await hc.PostAsJsonAsync(SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/internal/stop-generation", new object());
+                Console.WriteLine(response.Content.ToString());
+            }
+        }
+
+        private static async Task<List<OpenAIMessage>> Trim(ulong id, ulong msgId)
+        {
+            List<OpenAIMessage> laterMessages = new List<OpenAIMessage>();
+            int pos = -1;
+            try
+            {
+                for (int i = CurrentChats[id].Messages.Count - 1; i >= 0; i--)
+                {
+                    if (CurrentChats[id].Messages[i].msgId == msgId)
+                    {
+                        pos = i;
+                        break; // found the one we want
+                    }
+                    laterMessages.Add(CurrentChats[id].Messages[i]); // these are coming out in reverse order
+                    CurrentChats[id].Messages.RemoveAt(i);
+                }
+                if (pos == -1)
+                {
+                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Trim", "Message not found.");
+                    laterMessages.Reverse();
+                    CurrentChats[id].Messages = CurrentChats[id].Messages.Concat(laterMessages).ToList();
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Trim", "Message not found.");
+                laterMessages.Reverse();
+                CurrentChats[id].Messages = CurrentChats[id].Messages.Concat(laterMessages).ToList();
+                return null;
+            }
+            return laterMessages;
+        }
+
+        private static async Task Infer(OpenAIChatRequest request, ulong id, ulong? existingMsgId)
+        {
+            OpenAIChatResponse resp = null;
+            // let the system know we're the one generating currently
+            CurrentChats[id].IsGenerating = true;
+            //ulong? messageId = existingMsgId;
+            StringBuilder totalMessage = new StringBuilder();
+            // if existingMsgId exists in our cache, then it's content is the start of the reply
+            OpenAIMessage oim = CurrentChats[id].Messages.FirstOrDefault(x => x.msgId == existingMsgId);
+            if (oim != null)
+            {
+                totalMessage.Append(oim.content);
+            }
+            if (request.stream)
+            {
+                HttpRequestMessage hrm = new HttpRequestMessage(HttpMethod.Post, SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/chat/completions");
+                hrm.Content = new StringContent(JsonConvert.SerializeObject(request), Encoding.UTF8, "application/json");
+                HttpResponseMessage response = await hc.SendAsync(hrm, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                uint interval = SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.StreamMessageInterval;
+                using (Stream s = await response.Content.ReadAsStreamAsync(cancellationToken))
+                {
+                    using (StreamReader sr = new StreamReader(s))
+                    {
+                        long lastTime = 0;
+                        while (true)
+                        {
+                            string line = sr.ReadLine();
+                            if (line == null || line == "")
+                                continue;
+                            if (line.StartsWith("data: "))
+                            {
+                                line = line.Substring(6);
+                                resp = JsonConvert.DeserializeObject<OpenAIChatResponse>(line);
+                                if (resp != null && resp.choices.Count > 0)
+                                {
+                                    totalMessage.Append(resp.choices[0].delta.content);
+                                    long now = DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond;
+                                    if (now > (lastTime + interval))
+                                    {
+                                        // fire an update!
+                                        existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), existingMsgId);
+                                        lastTime = now;
+                                    }
+                                    if (resp.choices[0].finish_reason != null)
+                                    {
+                                        // this is the last part
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), existingMsgId, true);
+                CurrentChats[id].IsGenerating = false;
+            }
+            else
+            {
+                HttpResponseMessage response = await hc.PostAsJsonAsync(SharedContext.Instance.GetConfig().Oobabooga.URL + "/v1/chat/completions", request);
+                if (!response.IsSuccessStatusCode)
+                {
+                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Infer", $"Reveived status code: {response.StatusCode}");
+                    return;// new LLMResponse();
+                }
+                resp = await response.Content.ReadFromJsonAsync<OpenAIChatResponse>();
+                //LLMResponse llmr = new LLMResponse(res);
+                if (resp != null && resp.choices.Count > 0)
+                {
+                    totalMessage.Append(resp.choices[0].message.content);
+                }
+                existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), null, true);
+                CurrentChats[id].IsGenerating = false;
+            }
+            if (CurrentChats.ContainsKey(id) && resp != null)
+            {
+                // if this message is already here, replace it?
+                if (oim == null)
+                {
+                    CurrentChats[id].Messages.Add(new OpenAIMessage(Roles.assistant, totalMessage.ToString(), existingMsgId.Value, resp.usage.completion_tokens));
+                }
+                else
+                {
+                    oim.content = totalMessage.ToString();
+                    oim.tokens += resp.usage.completion_tokens; // replace needs to explicitly clear this first
+                }
+                CurrentChats[id].TokenCount = resp.usage.total_tokens;
+                await WriteHistory();
+            }
+            return;
+        }
     }
 }

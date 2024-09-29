@@ -27,9 +27,9 @@ namespace ComputeServerTempMonitor.Oobabooga.Models
             context = ch.SystemPrompt;
             preset = ch.Preset;
             // this isn't safe. probs move it. its a default anyway
-            stream = (bool)SharedContext.Instance.GetConfig().Oobabooga.DefaultParams["stream"];
-            mode = (string)SharedContext.Instance.GetConfig().Oobabooga.DefaultParams["mode"];
-            max_tokens = Convert.ToUInt32(SharedContext.Instance.GetConfig().Oobabooga.DefaultParams["max_new_tokens"]);
+            stream = SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.IsStreaming;
+            mode = SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.Mode;
+            max_tokens = SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.MaxNewTokens;
         }
         public List<OpenAIMessage> messages { get; set; } = new List<OpenAIMessage>();
         public string? character { get; set; }
