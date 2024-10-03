@@ -74,6 +74,7 @@ namespace ComputeServerTempMonitor.Discord
                             if (arg.Channel is SocketThreadChannel threadChannel &&  new_message != null && new_message != "")
                             {
                                 await threadChannel.ModifyMessageAsync(ulong.Parse(args[1]), s => s.Content = new_message);
+                                await OobaboogaMain.Replace(threadChannel.Id, ulong.Parse(args[1]), new_message);
                                 SharedContext.Instance.Log(LogLevel.INFO, "Discord.Modal", "Message content updated");
                                 await arg.RespondAsync("Content Updated", null, false, true);
                                 await arg.DeleteOriginalResponseAsync();// this might only work if not ephemeral
@@ -220,7 +221,7 @@ namespace ComputeServerTempMonitor.Discord
                                 float upscale_by = 2.0f; // default
                                 if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out upscale_by))
                                     return;
-                                await arg.RespondAsync($"{upscale_by}x upscale request accepted.\n{GetDrawStatus()}");
+                                await arg.RespondAsync($"{upscale_by}x upscale request accepted for {arg.User.Mention}.\n{GetDrawStatus()}");
                                 HistoryResponse? hr = await ComfyMain.Upscale(parts[1], 0, upscale_by, arg.User.Username);
                                 if (hr == null)
                                 {
@@ -276,7 +277,7 @@ namespace ComputeServerTempMonitor.Discord
                                 float vary_by = 0.5f; // default
                                 if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out vary_by))
                                     return;
-                                await arg.RespondAsync($"{Math.Round(vary_by * 100)}% variation request accepted.\n{GetDrawStatus()}");
+                                await arg.RespondAsync($"{Math.Round(vary_by * 100)}% variation request accepted for {arg.User.Mention}.\n{GetDrawStatus()}");
                                 HistoryResponse? hr = await ComfyMain.Variation(parts[1], 0, vary_by, arg.User.Username);
                                 if (hr == null)
                                 {
@@ -352,12 +353,25 @@ namespace ComputeServerTempMonitor.Discord
                 {
                     case "continue":
                         {
+                            arg.DeferAsync();
                             Task.Run(async () =>
                             {
                                 ulong tId = ulong.Parse(args[0]);
                                 ulong msgId = ulong.Parse(args[1]);
                                 if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, tId) != null)
-                                    await OobaboogaMain.Continue(tId, msgId, arg.User.GlobalName);
+                                {
+                                if (arg.Channel is SocketThreadChannel threadChannel)
+                                {
+                                    // clear buttons
+                                    ComponentBuilder cb = new ComponentBuilder();
+                                    ActionRowBuilder arb = new ActionRowBuilder();
+                                    ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
+                                    arb.AddComponent(bbredo.Build());
+                                    cb.AddRow(arb);
+                                        await threadChannel.ModifyMessageAsync(msgId, s => { s.Components = cb.Build(); });
+                                        await OobaboogaMain.Continue(tId, msgId, arg.User.GlobalName);
+                                    }
+                                }
                                 await arg.RespondAsync("Continued", null, false, true);
                                 await arg.DeleteOriginalResponseAsync();
                             }, cancellationToken);
@@ -369,7 +383,13 @@ namespace ComputeServerTempMonitor.Discord
                             {
                                 ulong tId = ulong.Parse(args[0]);
                                 if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, tId) != null)
-                                    await OobaboogaMain.Stop(tId, arg.User.GlobalName);
+                                {
+                                    if (arg.Channel is SocketThreadChannel threadChannel)
+                                    {
+                                        await OobaboogaMain.Stop(tId, arg.User.GlobalName);
+                                        await UpdateThreadControls(threadChannel);
+                                    }
+                                }
                                 await arg.RespondAsync("Stopped", null, false, true);
                                 await arg.DeleteOriginalResponseAsync();
                             }, cancellationToken);
@@ -377,6 +397,7 @@ namespace ComputeServerTempMonitor.Discord
                         return;
                     case "deletemsg":
                         {
+                            arg.DeferAsync();
                             Task.Run(async () =>
                             {
                                 ulong tId = ulong.Parse(args[0]);
@@ -384,7 +405,10 @@ namespace ComputeServerTempMonitor.Discord
                                 if (arg.Channel is SocketThreadChannel threadChannel)
                                 {
                                     if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, threadChannel.Id) != null)
+                                    {
                                         await threadChannel.DeleteMessageAsync(msgId);
+                                        await UpdateThreadControls(threadChannel);
+                                    }
                                 }
                                 await arg.RespondAsync("Message Deleted", null, false, true);
                                 await arg.DeleteOriginalResponseAsync();
@@ -405,10 +429,11 @@ namespace ComputeServerTempMonitor.Discord
                         return;
                     case "llmregenerate":
                         {
+                            arg.DeferAsync();
                             Task.Run(async () =>
                             {
                                 ulong tId = ulong.Parse(args[0]);
-                                ulong msgId = ulong.Parse(args[0]);
+                                ulong msgId = ulong.Parse(args[1]);
                                 if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, tId) != null)
                                     await OobaboogaMain.Regenerate(tId, msgId, arg.User.GlobalName);
                                 await arg.RespondAsync("Regenerated", null, false, true);
@@ -576,6 +601,7 @@ namespace ComputeServerTempMonitor.Discord
                     {
                         ActionRowBuilder arb = new ActionRowBuilder();
                         ButtonBuilder bbredo = new ButtonBuilder($"Reroll", $"regenerate:{hr.prompt[1].ToString()}", ButtonStyle.Success, null, new Emoji("🎲"), false, null);
+                        // ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
                         //ButtonBuilder mtest = new ButtonBuilder($"Modal Test", $"modal:{hr.prompt[1].ToString()}", ButtonStyle.Success, null, new Emoji("🤔"), false, null);
                         arb.AddComponent(bbredo.Build());
                         //arb.AddComponent(mtest.Build());
@@ -601,23 +627,23 @@ namespace ComputeServerTempMonitor.Discord
 
         private static async Task MessageDeleted(Cacheable<IMessage, ulong> arg1, Cacheable<IMessageChannel, ulong> arg2)
         {
-        ChatHistory ch = OobaboogaMain.FindExistingChat(null, arg2.Id);
-        if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && !SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersParticipate && ch == null)
-            return;
-        Task.Run(async () =>
-        {
-            await OobaboogaMain.DeleteMessage(arg2.Id, arg1.Id);
-            // replace by ID?
-            SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM thread message delete received.");
-        }, cancellationToken);
-        // check its a thread with an LLM attached
-        // so i need to find the message in my context and remove it? 
-    }
+            ChatHistory ch = OobaboogaMain.FindExistingChat(null, arg2.Id);
+            if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && !SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersParticipate && ch == null)
+                return;
+            Task.Run(async () =>
+            {
+                await OobaboogaMain.DeleteMessage(arg2.Id, arg1.Id);
+                // replace by ID?
+                SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM thread message delete received.");
+            }, cancellationToken);
+            // check its a thread with an LLM attached
+            // so i need to find the message in my context and remove it? 
+        }
 
         private static async Task MessageUpdated(Cacheable<IMessage, ulong> arg1, SocketMessage arg2, ISocketMessageChannel arg3)
         {
             // i think arg3 is the thread? maybe? check?
-            if (arg2.Type == MessageType.Default && arg3 is SocketThreadChannel threadChannel)
+            if (arg2.Type == MessageType.Default && arg3 is SocketThreadChannel threadChannel && !arg2.Author.IsBot)
             {
                 ChatHistory ch = OobaboogaMain.FindExistingChat(arg2.Author.GlobalName, threadChannel.Id);
                 if (ch != null && ch.IsGenerating)
@@ -643,67 +669,102 @@ namespace ComputeServerTempMonitor.Discord
             //throw new NotImplementedException();
         }
 
+
+
         public static async Task<ulong> SendThreadMessage(ulong tId, string msg, ulong? updateMsgId, bool finished = false)
         {
-            if (msg == null || msg == "" || msg.Trim() == "")
-                msg = ".";
-            ComponentBuilder cb = new ComponentBuilder();
-            ActionRowBuilder arb = new ActionRowBuilder();
-            if (finished)
+            try
             {
-                // add regen, remove, edit buttons
-                ButtonBuilder bbreg = new ButtonBuilder($"Regen", $"llmregenerate:{tId},{updateMsgId}", ButtonStyle.Primary, null, new Emoji("♻"), false, null);
-                ButtonBuilder bbcont = new ButtonBuilder($"Cont.", $"continue:{tId},{updateMsgId}", ButtonStyle.Success, null, new Emoji("➡"), false, null);
-                ButtonBuilder bbedit = new ButtonBuilder($"Edit", $"edit:{tId},{updateMsgId}", ButtonStyle.Secondary, null, new Emoji("✂"), false, null);
-                ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{tId},{updateMsgId}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
-                arb.AddComponent(bbreg.Build());
-                arb.AddComponent(bbcont.Build());
-                arb.AddComponent(bbedit.Build());
-                arb.AddComponent(bbdel.Build());
-            }
-            else
-            {
-                ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
-                arb.AddComponent(bbredo.Build());
-            }
-            cb.AddRow(arb);
+                if (msg == null || msg == "" || msg.Trim() == "")
+                    msg = ".";
 
-            var channel = _client.GetChannel(tId);
-            if (channel is SocketThreadChannel threadChannel)
-            {
-                if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.RemovePreviousControls && finished)
+                var channel = _client.GetChannel(tId);
+                if (channel is SocketThreadChannel threadChannel)
                 {
-                    var messages = await threadChannel.GetMessagesAsync(10).FlattenAsync();
-                    foreach (var message in messages)
+                    if (updateMsgId.HasValue && updateMsgId.Value != 0)
                     {
-                        // skip the one we're working on
-                        if (message.Id == updateMsgId)
-                        {
-                            continue;
-                        }
-                        if(_client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id)
-                            await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = new ComponentBuilder().Build(); });
-                    }
-                }
-                if (updateMsgId.HasValue)
-                {
-                    IMessage oldMsg = await threadChannel.GetMessageAsync(updateMsgId.Value);
-                    if (oldMsg != null)
-                    {
-                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => { m.Content = msg; m.Components = cb.Build(); });
+                        // just replace the text
+                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => { m.Content = msg; });
+                        if (finished)
+                            await UpdateThreadControls(threadChannel);
                         return updateMsgId.Value;
                     }
+                    else
+                    {
+                        ComponentBuilder cb = new ComponentBuilder();
+                        ActionRowBuilder arb = new ActionRowBuilder();
+                        ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
+                        arb.AddComponent(bbredo.Build());
+                        cb.AddRow(arb);
+                        var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, cb.Build());
+                        if (finished)
+                            await UpdateThreadControls(threadChannel);
+                        return res.Id;
+                    }
                 }
-                else
-                {
-                    var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, cb.Build());
-                    return res.Id;
-                }
+            }
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Discord.SendMessage", $"Failed to send thread message: {ex.ToString()}");
             }
             return 0;
         }
 
-            private static async Task MessageReceived(SocketMessage arg)
+        private static async Task UpdateThreadControls(SocketThreadChannel threadChannel)
+        {
+            try
+            {
+                var messages = await threadChannel.GetMessagesAsync(10).FlattenAsync();
+                bool latest = true;
+                foreach (var message in messages)
+                {
+                    ComponentBuilder cb = new ComponentBuilder();
+                    ActionRowBuilder arb = new ActionRowBuilder();
+                    if (latest && _client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
+                    {
+                        latest = false;
+                        // add regen, remove, edit buttons
+                        ButtonBuilder bbreg = new ButtonBuilder($"Regen", $"llmregenerate:{threadChannel.Id},{message.Id}", ButtonStyle.Primary, null, new Emoji("♻"), false, null);
+                        ButtonBuilder bbcont = new ButtonBuilder($"Cont.", $"continue:{threadChannel.Id},{message.Id}", ButtonStyle.Success, null, new Emoji("➡"), false, null);
+                        ButtonBuilder bbedit = new ButtonBuilder($"Edit", $"edit:{threadChannel.Id},{message.Id}", ButtonStyle.Secondary, null, new Emoji("✂"), false, null);
+                        ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
+                        arb.AddComponent(bbreg.Build());
+                        arb.AddComponent(bbcont.Build());
+                        arb.AddComponent(bbedit.Build());
+                        arb.AddComponent(bbdel.Build());
+                        cb.AddRow(arb);
+                        await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = cb.Build(); });
+                    }
+                    else if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.RemovePreviousControls)
+                    {
+                        if (_client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
+                            await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = new ComponentBuilder().Build(); });
+                    }
+                }
+                ComponentBuilder cbt = new ComponentBuilder();
+                ActionRowBuilder arbt = new ActionRowBuilder();
+                // add regen, remove, edit buttons
+                ButtonBuilder bbdelt = new ButtonBuilder($"Delete Thread", $"delete:{threadChannel.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
+                arbt.AddComponent(bbdelt.Build());
+                cbt.AddRow(arbt);
+                messages = await threadChannel.GetMessagesAsync(threadChannel.Id, Direction.After, 2).FlattenAsync();
+                // get the first message maybe?
+                foreach (var message in messages)
+                {
+                    if (_client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
+                    {
+                        await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = cbt.Build(); });
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SharedContext.Instance.Log(LogLevel.ERR, "Discord.UpdateControls",  $"Failed to update thread controls: {ex.ToString()}");
+            }
+        }
+
+        private static async Task MessageReceived(SocketMessage arg)
         {
             //SharedContext.Instance.Log(LogLevel.INFO, "MessageReceived", $"Received a new message notification: {arg.Type}");
             // i should probably check for message updates as well
@@ -736,7 +797,7 @@ namespace ComputeServerTempMonitor.Discord
             }
         }
 
-        private static void AddLLMUsage(string username, uint promptTokens, uint completionTokens)
+        public static void AddLLMUsage(string username, uint promptTokens, uint completionTokens)
         {
             if (!usage.UsagePerUser.ContainsKey(username))
                 usage.UsagePerUser.Add(username, new Dictionary<string, uint>());
@@ -914,23 +975,12 @@ namespace ComputeServerTempMonitor.Discord
 
                                     if (res != null)
                                     {
-                                        // send the greeting if we've got one
-                                        //foreach (OpenAIMessage msg in res.Messages)
-                                        //{
-                                        //    if (msg.role != Enum.GetName(Roles.system) && msg.content != "")
-                                        //        await stc.SendMessageAsync(msg.content);
-                                        //}
                                         if (res.Greeting != null && res.Greeting != "")
                                         {
-                                            // a button to delete the thread
-                                            ComponentBuilder cb = new ComponentBuilder();
-                                            ActionRowBuilder arb = new ActionRowBuilder();
-                                                // add regen, remove, edit buttons
-                                            ButtonBuilder bbdel = new ButtonBuilder($"Delete Thread", $"delete:{stc.Id}", ButtonStyle.Danger, null, new Emoji("❌"), false, null);
-                                            arb.AddComponent(bbdel.Build());
-                                            cb.AddRow(arb);
-
-                                            await stc.SendMessageAsync(res.Greeting, false, null, null, null, null, cb.Build());
+                                            // await stc.SendMessageAsync(res.Greeting);
+                                            //// this should add the delete thread button
+                                            //await UpdateThreadControls(stc);
+                                            SendThreadMessage(stc.Id, res.Greeting, null, true);
 
                                         }
                                         await command.DeleteOriginalResponseAsync();

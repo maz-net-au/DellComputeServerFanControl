@@ -22,5 +22,6 @@ namespace ComputeServerTempMonitor.Hardware.Model
         public int LastTemp { get; set; } = 0;
         public uint FanSpeed { get; set; } = 0;
         public uint RequestedFanSpeed { get; set; } = 0;
+        public uint PowerConsumption { get; set; } = 0;
     }
 }

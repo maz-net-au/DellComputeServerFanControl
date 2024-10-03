@@ -353,7 +353,7 @@ namespace ComputeServerTempMonitor.Oobabooga
                 laterMessages = await Trim(id, msgId);
                 if (laterMessages == null)
                 {
-                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Regenerate", "Message not found.");
+                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Regenerate", $"Message not found. {msgId}");
                     return;
                 }
                 // remove the one we're replacing as well
@@ -422,7 +422,7 @@ namespace ComputeServerTempMonitor.Oobabooga
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Trim", "Message not found.");
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Trim", ex.ToString());
                 laterMessages.Reverse();
                 CurrentChats[id].Messages = CurrentChats[id].Messages.Concat(laterMessages).ToList();
                 return null;
@@ -441,7 +441,9 @@ namespace ComputeServerTempMonitor.Oobabooga
             OpenAIMessage oim = CurrentChats[id].Messages.FirstOrDefault(x => x.msgId == existingMsgId);
             if (oim != null)
             {
-                totalMessage.Append(oim.content);
+                // the existing message for a "continue" all comes back with the first token.
+                // therefore don't add it or it duplicates it
+                //totalMessage.Append(oim.content);
             }
             if (request.stream)
             {
@@ -461,6 +463,7 @@ namespace ComputeServerTempMonitor.Oobabooga
                                 continue;
                             if (line.StartsWith("data: "))
                             {
+                                //Console.WriteLine(line);
                                 line = line.Substring(6);
                                 resp = JsonConvert.DeserializeObject<OpenAIChatResponse>(line);
                                 if (resp != null && resp.choices.Count > 0)
@@ -484,6 +487,7 @@ namespace ComputeServerTempMonitor.Oobabooga
                     }
                 }
                 existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), existingMsgId, true);
+                DiscordMain.AddLLMUsage(CurrentChats[id].Username, resp.usage.prompt_tokens, resp.usage.completion_tokens); 
                 CurrentChats[id].IsGenerating = false;
             }
             else
@@ -499,6 +503,7 @@ namespace ComputeServerTempMonitor.Oobabooga
                 if (resp != null && resp.choices.Count > 0)
                 {
                     totalMessage.Append(resp.choices[0].message.content);
+                    DiscordMain.AddLLMUsage(CurrentChats[id].Username, resp.usage.prompt_tokens, resp.usage.completion_tokens);
                 }
                 existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), null, true);
                 CurrentChats[id].IsGenerating = false;
