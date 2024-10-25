@@ -37,6 +37,13 @@ namespace ComputeServerTempMonitor.Software
             return sb.ToString();
         }
 
+        public static bool IsRunning(string name)
+        {
+            if (programs.ContainsKey(name) && programs[name].State == ProcessState.Running)
+                return true;
+            return false;
+        }
+
         public static string ConnectToProgram(string title)
         {
             string name = title.Replace("Administrator:  ", "");

@@ -7,6 +7,7 @@ using ComputeServerTempMonitor.Discord;
 using ComputeServerTempMonitor.Oobabooga;
 using ComputeServerTempMonitor.Oobabooga.Models;
 using Newtonsoft.Json;
+using ComputeServerTempMonitor.IoT;
 
 namespace ComputeServerTempMonitor;
 
@@ -54,6 +55,7 @@ class Program
         DiscordMain.Exit();
         HardwareMain.Exit();
         SoftwareMain.Exit();
+        IoTMain.Exit();
     }
 
     static async Task Main(string[] args)
@@ -66,13 +68,14 @@ class Program
         // is order important?
         try
         {
-            SharedContext.Instance.LoadConfig(configFile); 
+            SharedContext.Instance.LoadConfig(configFile);
 
-            OobaboogaMain.Init(cancellationTokenSource.Token);
-            ComfyMain.Init(cancellationTokenSource.Token);
-            DiscordMain.Init(cancellationTokenSource.Token);
             HardwareMain.Init(cancellationTokenSource.Token);
             SoftwareMain.Init(cancellationTokenSource.Token);
+            DiscordMain.Init(cancellationTokenSource.Token);
+            IoTMain.Init(cancellationTokenSource.Token);
+            OobaboogaMain.Init(cancellationTokenSource.Token);
+            ComfyMain.Init(cancellationTokenSource.Token);
         }
         catch (Exception ex)
         {

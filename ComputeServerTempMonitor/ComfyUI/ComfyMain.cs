@@ -178,8 +178,13 @@ namespace ComputeServerTempMonitor.ComfyUI
                     }
                     else if ((Requests[id].type & FlowModelTypes.sdxl) == FlowModelTypes.sdxl)
                     {
-                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sdxl variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "sdxl_variation", GenerateRandoms("sdxl_variation", rep, false));
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "sd_variation", GenerateRandoms("sd_variation", rep, false));
+                    }
+                    else if ((Requests[id].type & FlowModelTypes.sd35) == FlowModelTypes.sd35)
+                    {
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd3.5 variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "sd35_variation", GenerateRandoms("sd35_variation", rep, false));
                     }
                 }
                 // image needs to be a link to the one we're upscaling
@@ -233,10 +238,14 @@ namespace ComputeServerTempMonitor.ComfyUI
                     }
                     else if ((Requests[id].type & FlowModelTypes.sdxl) == FlowModelTypes.sdxl)
                     {
-                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sdxl upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
                         return await EnqueueRequest(userId, "full_upscale", rep);
                     }
-                    
+                    else if ((Requests[id].type & FlowModelTypes.sd35) == FlowModelTypes.sd35)
+                    {
+                        SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd3.5 upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
+                        return await EnqueueRequest(userId, "sd35_upscale", rep);
+                    }
                 }
             }
             // use the basic upscale if we dont have the original model or prompts

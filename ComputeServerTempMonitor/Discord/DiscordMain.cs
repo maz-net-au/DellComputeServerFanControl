@@ -22,6 +22,8 @@ using System.Reactive;
 using System.Reflection;
 using System.Security.Cryptography;
 using Discord.Interactions;
+using ComputeServerTempMonitor.IoT;
+using System.Xml.Linq;
 
 namespace ComputeServerTempMonitor.Discord
 {
@@ -32,6 +34,7 @@ namespace ComputeServerTempMonitor.Discord
         public static CommandUsage usage = new CommandUsage();
         const string userFile = "data/discordUsers.json";
         const string usageFile = "data/discordUsage.json";
+        const string tempDir = "temp/llm/";
         static CancellationToken cancellationToken;
 
         public static async Task InitBot()
@@ -673,10 +676,34 @@ namespace ComputeServerTempMonitor.Discord
 
         public static async Task<ulong> SendThreadMessage(ulong tId, string msg, ulong? updateMsgId, bool finished = false)
         {
+            SharedContext.Instance.Log(LogLevel.DBG, "Discord.SendMessage", $"Message sent: {updateMsgId}, finished={finished}");
+            List<FileAttachment> attachments = new List<FileAttachment>();
+            if (msg.Length > 2000)
+            {
+                if (!finished)
+                {
+                    // truncate and attach files later
+                    string alert = "\n\n --- message too long. Full response will be attached shortly ---";
+                    msg = msg.Substring(0, 2000 - alert.Length);
+                }
+                else
+                {
+                    // we're finished. make an attachment
+                    // this shouldn't be here, if we're being honest. this really needs a bot-first design
+                    if (!Directory.Exists(tempDir))
+                    {
+                        Directory.CreateDirectory(tempDir);
+                    }
+                    string filename = $"{tempDir}{DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond}-{new Random().Next(999999):000000}.txt";
+                    File.WriteAllText(filename, msg);
+                    attachments.Add(new FileAttachment(filename));
+                    msg = "Response exceeded max length. See attachment.";
+                }
+            }
             try
             {
                 if (msg == null || msg == "" || msg.Trim() == "")
-                    msg = ".";
+                    msg = "...";
 
                 var channel = _client.GetChannel(tId);
                 if (channel is SocketThreadChannel threadChannel)
@@ -684,7 +711,11 @@ namespace ComputeServerTempMonitor.Discord
                     if (updateMsgId.HasValue && updateMsgId.Value != 0)
                     {
                         // just replace the text
-                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => { m.Content = msg; });
+                        await threadChannel.ModifyMessageAsync(updateMsgId.Value, m => 
+                        { 
+                            m.Content = msg; 
+                            m.Attachments = (attachments.Count > 0 ? attachments : null); 
+                        });
                         if (finished)
                             await UpdateThreadControls(threadChannel);
                         return updateMsgId.Value;
@@ -696,10 +727,20 @@ namespace ComputeServerTempMonitor.Discord
                         ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
                         arb.AddComponent(bbredo.Build());
                         cb.AddRow(arb);
-                        var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, cb.Build());
+                        ulong resultId = 0;
+                        if (attachments.Count > 0)
+                        {
+                            var res = await threadChannel.SendFilesAsync(attachments, msg, false, null, null, null, null, cb.Build());
+                            resultId = res.Id;
+                        }
+                        else
+                        {
+                            var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, cb.Build());
+                            resultId = res.Id;
+                        }
                         if (finished)
                             await UpdateThreadControls(threadChannel);
-                        return res.Id;
+                        return resultId;
                     }
                 }
             }
@@ -977,12 +1018,12 @@ namespace ComputeServerTempMonitor.Discord
                                     {
                                         if (res.Greeting != null && res.Greeting != "")
                                         {
-                                            // await stc.SendMessageAsync(res.Greeting);
-                                            //// this should add the delete thread button
-                                            //await UpdateThreadControls(stc);
-                                            SendThreadMessage(stc.Id, res.Greeting, null, true);
-
+                                            res.Greeting = "Conversation begins";
                                         }
+                                        // await stc.SendMessageAsync(res.Greeting);
+                                        //// this should add the delete thread button
+                                        //await UpdateThreadControls(stc);
+                                        await SendThreadMessage(stc.Id, res.Greeting, null, true);
                                         await command.DeleteOriginalResponseAsync();
                                     }
                                     else
@@ -1049,6 +1090,46 @@ namespace ComputeServerTempMonitor.Discord
             // admin commands
             switch (command.Data.Name)
             {
+                case "iot":
+                    {
+                        var action = command.Data.Options?.First()?.Name;
+                        if (action == "camera")
+                        {
+                            string target = "";
+                            foreach (var op in command.Data.Options?.First().Options)
+                            {
+                                switch (op.Name)
+                                {
+                                    case "target":
+                                        target = (string)op.Value;
+                                        break;
+                                }
+                            }
+                            if (target != "")
+                            {
+                                await command.DeferAsync();
+                                Task.Run(async () =>
+                                {
+                                    string fn = await IoTMain.GetCameraFrame(target);
+                                    if (fn != "" && File.Exists(fn))
+                                    {
+                                        await command.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Camera frame for '{target}' requested by {command.User.Mention} at {DateTime.Now.ToString()}";
+                                            s.Attachments = new List<FileAttachment>()
+                                            {
+                                            new FileAttachment(fn)
+                                            };
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                }, cancellationToken);
+                                return;
+                            }
+                        }
+                        await command.RespondAsync("Unknown iot command");
+                        return;
+                    }
                 case "loadllm":
                     {
                         string model = "";
@@ -1165,34 +1246,36 @@ namespace ComputeServerTempMonitor.Discord
                         return;
                     }
                 case "software":
-                    var action = command.Data.Options?.First()?.Name;
-                    var name = command.Data.Options?.First().Options?.FirstOrDefault()?.Value;
-                    switch (action)
                     {
-                        case "start":
-                            Task.Run(async () =>
-                            {
-                                if (name != null)
+                        var action = command.Data.Options?.First()?.Name;
+                        var name = command.Data.Options?.First().Options?.FirstOrDefault()?.Value;
+                        switch (action)
+                        {
+                            case "start":
+                                Task.Run(async () =>
                                 {
-                                    await command.DeferAsync(false, RequestOptions.Default);
-                                    string res = SoftwareMain.StartSoftware((string)name);
-                                    SharedContext.Instance.Log(LogLevel.INFO, "SlashCommandHandler", res);
-                                    await command.ModifyOriginalResponseAsync((s) => { s.Content = res; });
-                                }
-                            });
-                            break;
-                        case "stop":
-                            Task.Run(async () =>
-                            {
-                                if (name != null)
+                                    if (name != null)
+                                    {
+                                        await command.DeferAsync(false, RequestOptions.Default);
+                                        string res = SoftwareMain.StartSoftware((string)name);
+                                        SharedContext.Instance.Log(LogLevel.INFO, "SlashCommandHandler", res);
+                                        await command.ModifyOriginalResponseAsync((s) => { s.Content = res; });
+                                    }
+                                });
+                                break;
+                            case "stop":
+                                Task.Run(async () =>
                                 {
-                                    await command.DeferAsync(false, RequestOptions.Default);
-                                    string res = SoftwareMain.StopSoftware((string)name);
-                                    SharedContext.Instance.Log(LogLevel.INFO, "SlashCommandHandler", res);
-                                    await command.ModifyOriginalResponseAsync((s) => { s.Content = res; });
-                                }
-                            });
-                            break;
+                                    if (name != null)
+                                    {
+                                        await command.DeferAsync(false, RequestOptions.Default);
+                                        string res = SoftwareMain.StopSoftware((string)name);
+                                        SharedContext.Instance.Log(LogLevel.INFO, "SlashCommandHandler", res);
+                                        await command.ModifyOriginalResponseAsync((s) => { s.Content = res; });
+                                    }
+                                });
+                                break;
+                        }
                     }
                     return;
             }
@@ -1502,6 +1585,25 @@ namespace ComputeServerTempMonitor.Discord
                 drawCommands.Add(flowCommand);
             }
 
+            var cameraList = new SlashCommandOptionBuilder()
+                .WithName("target")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithDescription("Select camera")
+                .WithRequired(true);
+            foreach (string cam in SharedContext.Instance.GetConfig().mIoT.CameraNames)
+            {
+                cameraList.AddChoice(cam, cam);
+            }
+
+            var iotCommands = new SlashCommandBuilder()
+                .WithName("iot")
+                .WithDescription("Interact with IoT hardware")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("camera")
+                    .WithDescription("Retrieves a frame from a camera")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(cameraList));
+
             foreach (ulong srvId in discordInfo.Servers.Keys)
             {
                 guildCommands[srvId] = new List<ApplicationCommandProperties>();
@@ -1547,6 +1649,11 @@ namespace ComputeServerTempMonitor.Discord
                     {
                         guildCommands[srvId].Add(flowCommand.Build());
                     }
+                }
+
+                if (CommandAllowed(srvId, "iot"))
+                {
+                    guildCommands[srvId].Add(iotCommands.Build());
                 }
             }
 

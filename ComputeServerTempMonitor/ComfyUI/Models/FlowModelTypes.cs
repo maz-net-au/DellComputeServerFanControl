@@ -12,6 +12,7 @@ namespace ComputeServerTempMonitor.ComfyUI.Models
         unknown = 0x00,
         sdxl = 0x01,
         sd3 = 0x02,
-        flux = 0x04
+        flux = 0x04,
+        sd35 = 0x08
     }
 }

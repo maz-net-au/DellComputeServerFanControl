@@ -1,6 +1,7 @@
 ﻿using ComputeServerTempMonitor.Common;
 using ComputeServerTempMonitor.Discord;
 using ComputeServerTempMonitor.Oobabooga.Models;
+using ComputeServerTempMonitor.Software;
 using Discord.Net;
 using Newtonsoft.Json;
 using System;
@@ -19,7 +20,6 @@ namespace ComputeServerTempMonitor.Oobabooga
     {
         public static HttpClient hc = new HttpClient();
         public static string CurrentModel = "";
-        public static uint CurrentMaxContext = 0;
         public static CancellationToken cancellationToken;
         private const string chatHistoryFile = "data/llmHistory.json";
         public static Dictionary<ulong, ChatHistory> CurrentChats { get; set; } = new Dictionary<ulong, ChatHistory>();
@@ -57,9 +57,10 @@ namespace ComputeServerTempMonitor.Oobabooga
             hc.Timeout = new TimeSpan(0, 30, 0);
             cancellationToken = token;
             // get the current model
-            CurrentModel = await GetLoadedModel();
-            if (CurrentModel != "")
-                CurrentMaxContext = Convert.ToUInt32(SharedContext.Instance.GetConfig().Oobabooga.Models[CurrentModel]?.Args?["n_ctx"] ?? 0);
+            if (SoftwareMain.IsRunning("llm"))
+            {
+                CurrentModel = await GetLoadedModel();
+            }
             await LoadHistory();
         }
 
@@ -77,13 +78,15 @@ namespace ComputeServerTempMonitor.Oobabooga
                 foreach (KeyValuePair<string, ModelConfig> mc in SharedContext.Instance.GetConfig().Oobabooga.Models)
                 {
                     if (mn == mc.Value.Filename)
+                    {
                         return mc.Key;
+                    }
                 }
                 return "";
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "OobaboogaMain", ex.ToString());
+                SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.GetModel", $"Unable to retrieve currently loaded model: {ex.Message}");
                 return "";
             }
             // this is an object?
@@ -177,11 +180,6 @@ namespace ComputeServerTempMonitor.Oobabooga
         {
             try
             {
-                if (CurrentModel == "")
-                {
-                    SharedContext.Instance.Log(LogLevel.ERR, "Oobabooga.Ask", "Current model is blank");
-                    return null;
-                }
                 // let the discord module deal with making the thread etc. this one simply runs generation
                 // i probably need to store a uuid for the chat, the thread Id, the guild/server, the user who started it, total context length
                 OpenAIChatRequest request = new OpenAIChatRequest();
@@ -479,6 +477,7 @@ namespace ComputeServerTempMonitor.Oobabooga
                                     if (resp.choices[0].finish_reason != null)
                                     {
                                         // this is the last part
+                                        lastTime = now;
                                         break;
                                     }
                                 }

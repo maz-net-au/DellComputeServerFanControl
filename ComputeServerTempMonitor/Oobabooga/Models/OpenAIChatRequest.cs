@@ -14,6 +14,19 @@ namespace ComputeServerTempMonitor.Oobabooga.Models
         public OpenAIChatRequest() { }
         public OpenAIChatRequest(ChatHistory ch)
         {
+            if (OobaboogaMain.CurrentModel == "")
+            {
+                OobaboogaMain.CurrentModel = OobaboogaMain.GetLoadedModel().Result;
+                if (OobaboogaMain.CurrentModel != "")
+                {
+                    truncation_length = Convert.ToUInt32(SharedContext.Instance.GetConfig().Oobabooga.Models[OobaboogaMain.CurrentModel]?.Args?["n_ctx"] ?? 8192); // 8k failsafe default?
+                }
+                else
+                {
+                    SharedContext.Instance.Log(LogLevel.ERR, "OpenAIChatRequest.ctor", "Cannot load current model.");
+                    truncation_length = 8192;
+                }
+            }
             messages = ch.Messages;
             if (ch.Character != null && ch.Character != "")
             {
@@ -22,7 +35,6 @@ namespace ComputeServerTempMonitor.Oobabooga.Models
             name2 = ch.Name;
             stop.Add($"{ch.Name}:");
             name1 = ch.Username;
-            truncation_length = OobaboogaMain.CurrentMaxContext;
             stop.Add($"{ch.Username}:");
             context = ch.SystemPrompt;
             preset = ch.Preset;

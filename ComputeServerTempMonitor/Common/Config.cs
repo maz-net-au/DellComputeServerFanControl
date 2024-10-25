@@ -32,6 +32,7 @@ namespace ComputeServerTempMonitor.Common
         public Dictionary<string, SoftwareRef> Software = new Dictionary<string, SoftwareRef>();
         public ComfyUIConfig ComfyUI { get; set; } = new ComfyUIConfig();
         public OobaboogaConfig Oobabooga { get; set; } = new OobaboogaConfig();
+        public mIoTSettings mIoT { get; set; } = new mIoTSettings();
     }
     public class FanTempSpeeds
     {
@@ -71,6 +72,12 @@ namespace ComputeServerTempMonitor.Common
         public int MaximumControlsDimension { get; set; }
     }
 
+    public class mIoTSettings
+    {
+        public string URL { get; set; } = "";
+        public List<string> CameraNames { get; set; } = new List<string>();
+
+    }
     public class ComfyUIField
     {
         public ComfyUIField() { }
