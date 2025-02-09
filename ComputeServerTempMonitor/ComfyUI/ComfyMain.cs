@@ -1,5 +1,7 @@
 ﻿using ComputeServerTempMonitor.ComfyUI.Models;
 using ComputeServerTempMonitor.Common;
+using ComputeServerTempMonitor.NewRelic.Models;
+using ComputeServerTempMonitor.NewRelic;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Net.Http.Json;
@@ -28,7 +30,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             return models;
         }
-        
+
         private static void SaveCache()
         {
             File.WriteAllText(requestFile, JsonConvert.SerializeObject(Requests, Formatting.Indented));
@@ -397,6 +399,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                 SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"New prompt accepted {enqueueResponse.prompt_id}");
                 Requests.Add(enqueueResponse.prompt_id, new GenerationRequest(flowName, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Type, replacements));
                 CurrentQueueLength++;
+                NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueueLength });
                 // so now we have a successfully queued prompt. we should poll the /history for it periodically
                 Thread.Sleep(1000);
                 bool success = await PopulateHistory(enqueueResponse.prompt_id, 600000);
@@ -408,6 +411,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                 if (!History.ContainsKey(enqueueResponse.prompt_id))
                     return null;
                 CurrentQueueLength--;
+                NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueueLength });
                 return History[enqueueResponse.prompt_id];
             }
             catch (Exception ex)
@@ -436,6 +440,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                         string content = await queueRes.Content.ReadAsStringAsync();
                         QueueInfo queueInfo = JsonConvert.DeserializeObject<QueueInfo>(content);
                         CurrentQueueLength = queueInfo.exec_info.queue_remaining;
+                        NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueueLength });
                         if (queueInfo.exec_info.queue_remaining == 0)
                         {
                             // cant be waiting if there's nothing queued

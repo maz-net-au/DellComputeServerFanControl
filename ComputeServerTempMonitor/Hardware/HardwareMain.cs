@@ -12,6 +12,9 @@ using System.Threading;
 using System.Diagnostics;
 using static System.Net.WebRequestMethods;
 using System.Reflection;
+using ComputeServerTempMonitor.NewRelic;
+using ComputeServerTempMonitor.NewRelic.Models;
+using YamlDotNet.Core;
 
 namespace ComputeServerTempMonitor.Hardware
 {
@@ -29,6 +32,11 @@ namespace ComputeServerTempMonitor.Hardware
         static GPUPerformanceState GPUPerfState = GPUPerformanceState.Auto;
 
         static PerformanceCounter cpuCounter;
+
+        static bool CPUStarted = false;
+        static bool GPUStarted = false;
+        static bool PerfStarted = false;
+        static bool FanStarted = false;
 
         public static void Init(CancellationToken ct)
         {
@@ -92,8 +100,12 @@ namespace ComputeServerTempMonitor.Hardware
                                 gpuPerf[i].FanSpeed = GPUApi.GetClientFanCoolersControl(handles[i]).FanCoolersControlEntries.FirstOrDefault().Level;
                             }
                             catch (Exception ex) { }
+                            string logName = $"gpu.{gpuPerf[i].Name.Replace(" ", "").Replace("_", "")}.{i}.".ToLower();
+                            NewRelicMain.Log(new Metric(){ name = logName + "temp", value = gpuPerf[i].LastTemp });
+                            NewRelicMain.Log(new Metric() { name = logName + "fanspeed", value = gpuPerf[i].FanSpeed });
+                            NewRelicMain.Log(new Metric() { name = logName + "utilisation", value = gpuPerf[i].LastUtilisation });
                         }
-
+                        GPUStarted = true;
                         Thread.Sleep(SharedContext.Instance.GetConfig().GPUCheckingInterval * 1000);
                     }
                     catch (Exception ex)
@@ -103,6 +115,62 @@ namespace ComputeServerTempMonitor.Hardware
                 }
             }, cancellationToken);
             tGpu.Start();
+
+            // periodically check the power consumption, memory clocks and memory utilisation
+            Task tGpu2 = new Task(async () =>
+            {
+                if (SharedContext.Instance.GetConfig().SMIPath == "")
+                {
+                    SharedContext.Instance.Log(LogLevel.ERR, "HardwareMain", "SMIPath not set.");
+                }
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        // get other details from smi
+                        List<string> smiOut = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().SMIPath, $"dmon -s pcm -c 1");
+                        /*
+C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
+# gpu   pwr gtemp mtemp  mclk  pclk    fb  bar1
+# Idx     W     C     C   MHz   MHz    MB    MB
+    0     14     34      -    405    645  41205      5
+    1      9     37      -    405    645  40110      7
+                        */
+                        foreach (string line in smiOut)
+                        {
+                            string l = line.Trim();
+                            if (l == "" || l.StartsWith("#"))
+                                continue;
+                            string[] gpuD = l.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                            // which is the temp?
+                            if (gpuD.Length >= 8)
+                            {
+                                //Console.WriteLine(string.Join(",", gpuD));
+                                uint i = uint.Parse(gpuD[0]);
+                                // gpuD[1] is power in Watts
+                                // gpuD[4] is mem clock
+                                // gpuD[5] is gpu clock
+                                // gpuD[6] is used vram in MB
+                                gpuPerf[i].PowerConsumption = uint.Parse(gpuD[1]);
+                                gpuPerf[i].MemoryClock = uint.Parse(gpuD[4]);
+                                gpuPerf[i].ProcessorClock = uint.Parse(gpuD[5]);
+                                gpuPerf[i].UsedVRAM = uint.Parse(gpuD[6]);
+                                string logName = $"gpu.{gpuPerf[i].Name.Replace(" ", "").Replace("_", "")}.{i}.".ToLower();
+                                NewRelicMain.Log(new Metric() { name = logName + "power", value = gpuPerf[i].PowerConsumption });
+                                NewRelicMain.Log(new Metric() { name = logName + "mclk", value = gpuPerf[i].MemoryClock });
+                                NewRelicMain.Log(new Metric() { name = logName + "pclk", value = gpuPerf[i].ProcessorClock });
+                                NewRelicMain.Log(new Metric() { name = logName + "usedvram", value = gpuPerf[i].UsedVRAM });
+                            }
+                        }
+                        Thread.Sleep(SharedContext.Instance.GetConfig().GPUCheckingInterval * 1000);
+                    }
+                    catch (Exception ex)
+                    {
+                        SharedContext.Instance.Log(LogLevel.ERR, "Main", "Error reading SMI data: " + ex.Message);
+                    }
+                }
+            }, cancellationToken);
+            tGpu2.Start();
 
             // in a task
             Task tCpu = new Task(async () =>
@@ -139,6 +207,7 @@ namespace ComputeServerTempMonitor.Hardware
                                             }
                                             int temp = int.Parse(cpuD[4].Replace(" degrees C", ""));
                                             serverStats.cpuStats[cpuNum].LastTemp = temp;
+                                            NewRelicMain.Log(new Metric() { name = $"cpu.{cpuNum}.temp", value = serverStats.cpuStats[cpuNum].LastTemp });
                                             cpuNum++;
                                         }
                                         break;
@@ -146,18 +215,19 @@ namespace ComputeServerTempMonitor.Hardware
                                         {
                                             int temp = int.Parse(cpuD[4].Replace(" degrees C", ""));
                                             serverStats.InletTemp = temp;
+                                            NewRelicMain.Log(new Metric() { name = $"chassis.inlet.temp", value = serverStats.InletTemp });
                                         }
                                         break;
                                     case "Exhaust Temp":
                                         {
                                             int temp = int.Parse(cpuD[4].Replace(" degrees C", ""));
                                             serverStats.ExhaustTemp = temp;
+                                            NewRelicMain.Log(new Metric() { name = $"chassis.exhaust.temp", value = serverStats.ExhaustTemp });
                                         }
                                         break;
                                 }
                             }
                         }
-
                         // get power usage from IPMI
                         List<string> ipmiPowerOut = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} sdr type Current");
                         // call IPMI commands to get cpu temps
@@ -176,6 +246,7 @@ namespace ComputeServerTempMonitor.Hardware
                                         {
                                             uint watts = uint.Parse(pwrD[4].Replace(" Watts", ""));
                                             serverStats.PowerConsumption = watts;
+                                            NewRelicMain.Log(new Metric() { name = $"chassis.power", value = serverStats.PowerConsumption });
                                         }
                                         break;
                                 }
@@ -198,14 +269,19 @@ namespace ComputeServerTempMonitor.Hardware
                                 {
                                     uint rpm = uint.Parse(fanD[4].Replace(" RPM", ""));
                                     serverStats.ChassisFansRPM[fanD[0]] = rpm;
+                                    NewRelicMain.Log(new Metric() { name = $"chassis.fan.{fanD[0].Substring(fanD[0].Length-1)}.rpm", value = serverStats.ChassisFansRPM[fanD[0]] });
                                 }
                             }
                         }
 
                         serverStats.CpuUtilisation = cpuCounter.NextValue();
+                        NewRelicMain.Log(new Metric() { name = $"cpu.utilisation", value = serverStats.CpuUtilisation });
                         GCMemoryInfo memInfo = GC.GetGCMemoryInfo();
                         serverStats.MemoryUtilisation = (memInfo.MemoryLoadBytes * 100.0f) / memInfo.TotalAvailableMemoryBytes; // percent
+                        NewRelicMain.Log(new Metric() { name = $"memory.utilisation", value = serverStats.MemoryUtilisation });
+                        NewRelicMain.Log(new Metric() { name = $"memory.usedbytes", value = memInfo.MemoryLoadBytes * 100.0f });
                         // poll
+                        CPUStarted = true;
                         Thread.Sleep(SharedContext.Instance.GetConfig().CPUCheckingInterval * 1000);
                     }
                     catch (Exception ex)
@@ -260,6 +336,7 @@ namespace ComputeServerTempMonitor.Hardware
                                 }
                             }
                         }
+                        PerfStarted = true;
                         Thread.Sleep(1000);
                     }
                     catch (Exception ex)
@@ -330,6 +407,7 @@ namespace ComputeServerTempMonitor.Hardware
                             //printState(true);
                         }
                         fanDetails["Until"] = new DateTime(serverStats.ChassisFanSpinDownAt).ToString();
+                        FanStarted = true;
                         Thread.Sleep(3000);
                     }
                     catch (Exception ex)
@@ -339,6 +417,42 @@ namespace ComputeServerTempMonitor.Hardware
                 }
             }, cancellationToken);
             tFan.Start();
+        }
+
+        // instead of periodically reading the state, we should raise a metric / log / event when something happens
+        // let the newrelic module sort out the batching and sending of that
+        public static Dictionary<string, object>? GetMonitoring()
+        {
+            if (CPUStarted && GPUStarted && PerfStarted && FanStarted)
+            {
+                Dictionary<string, object> stats = new Dictionary<string, object>();
+                foreach (KeyValuePair<uint, CPUStats> cpu in serverStats.cpuStats)
+                {
+                    stats[cpu.Value.Name.Replace("_", "") + "Temp"] = cpu.Value.LastTemp;
+                    stats[cpu.Value.Name.Replace("_", "") + "Util"] = serverStats.CpuUtilisation;
+                }
+                stats["InletTemp"] = serverStats.InletTemp;
+                stats["ExhaustTemp"] = serverStats.ExhaustTemp;
+                stats["MemoryUtil"] = serverStats.MemoryUtilisation;
+                stats["PowerConsumption"] = serverStats.PowerConsumption;
+                int i = 0;
+                foreach (KeyValuePair<uint, GPUStats> gpu in gpuPerf)
+                {
+                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}Temp"] = gpu.Value.LastTemp;
+                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}FanSpeed"] = gpu.Value.FanSpeed;
+                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}Util"] = gpu.Value.LastUtilisation;
+                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}PowerState"] = (GPUPerfState == GPUPerformanceState.Auto ? Enum.GetName(gpu.Value.State) : Enum.GetName(GPUPerfState));
+                    i++;
+                }
+                stats["ChassisFansSpeed"] = serverStats.ChassisFanSpeedPct;
+                foreach (KeyValuePair<string, uint> fan in serverStats.ChassisFansRPM)
+                {
+                    stats[fan.Key + "RPM"] = fan.Value;
+                }
+                stats["ChassisFanSpeedTTL"] = serverStats.ChassisFanSpinDownAt / TimeSpan.TicksPerMillisecond;
+                return stats;
+            }
+            return null;
         }
 
         public static string GetCLIStatus(bool showHeaders)
@@ -424,6 +538,7 @@ namespace ComputeServerTempMonitor.Hardware
             return sb.ToString();
         }
 
+
         public static string Reset()
         {
             serverStats.ChassisFanSpinDownAt = DateTime.Now.Ticks;
@@ -505,6 +620,8 @@ namespace ComputeServerTempMonitor.Hardware
                 {
                     GPUApi.SetForcePstate(handles[index], 8, 2);
                 }
+                string logName = $"gpu.{gpuPerf[index].Name.Replace(" ", "").Replace("_", "")}.{index}.".ToLower();
+                NewRelicMain.Log(new Metric() { name = logName + "pstate", value = 8 });
                 return true;
             }
             return false;
@@ -518,6 +635,8 @@ namespace ComputeServerTempMonitor.Hardware
                 {
                     GPUApi.SetForcePstate(handles[index], 16, 2);
                 }
+                string logName = $"gpu.{gpuPerf[index].Name.Replace(" ", "").Replace("_", "")}.{index}.".ToLower();
+                NewRelicMain.Log(new Metric() { name = logName + "pstate", value = 1 });
                 return true;
             }
             return false;
@@ -535,6 +654,7 @@ namespace ComputeServerTempMonitor.Hardware
             }
             serverStats.ChassisFanSpeedPct = newSpeed;
             serverStats.ChassisFanSpinDownAt = DateTime.Now.AddSeconds(SharedContext.Instance.GetConfig().FanSpinDownDelay).Ticks;
+            NewRelicMain.Log(new Metric() { name = "chassis.fans.speed", value = newSpeed });
             return $"Set fan speed to {newSpeed}%";
         }
 

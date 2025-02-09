@@ -1,5 +1,7 @@
 ﻿using ComputeServerTempMonitor.ComfyUI;
 using ComputeServerTempMonitor.Common;
+using ComputeServerTempMonitor.NewRelic.Models;
+using ComputeServerTempMonitor.NewRelic;
 using ComputeServerTempMonitor.Software.Models;
 using System;
 using System.Collections.Generic;
@@ -58,10 +60,12 @@ namespace ComputeServerTempMonitor.Software
                         programs.Add(name, SharedContext.Instance.GetConfig().Software[name]);
                         programs[name].Proc = process;
                         programs[name].State = ProcessState.Running;
+                        NewRelicMain.Log(new Metric() { name = $"software.{SharedContext.Instance.GetConfig().Software[name].Name.ToLower()}.running", value = 1 });
                         return $"Application '{SharedContext.Instance.GetConfig().Software[name].Name}' connected.";
                     }
                 }
             }
+            NewRelicMain.Log(new Metric() { name = $"software.{SharedContext.Instance.GetConfig().Software[name].Name.ToLower()}.running", value = 0 });
             return $"Could not find {name}";
         }
         public static string StartSoftware(string name)
@@ -87,6 +91,7 @@ namespace ComputeServerTempMonitor.Software
                     return "Application failed to start.";
                 }
                 programs[name].State = ProcessState.Running;
+                NewRelicMain.Log(new Metric() { name = $"software.{SharedContext.Instance.GetConfig().Software[name].Name.ToLower()}.running", value = 1 });
                 return $"Application '{SharedContext.Instance.GetConfig().Software[name].Name}' started.";
             }
             return "Invalid program name.";
@@ -119,6 +124,7 @@ namespace ComputeServerTempMonitor.Software
                     programs[name].State = ProcessState.Stopped;
                 if (programs[name].Proc.HasExited)
                     programs[name].State = ProcessState.Stopped;
+                NewRelicMain.Log(new Metric() { name = $"software.{SharedContext.Instance.GetConfig().Software[name].Name.ToLower()}.running", value = 0 });
                 return $"Application '{SharedContext.Instance.GetConfig().Software[name].Name}' stopped.";
             }
             return "Invalid program name.";

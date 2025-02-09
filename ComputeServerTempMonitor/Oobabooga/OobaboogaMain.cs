@@ -1,5 +1,7 @@
 ﻿using ComputeServerTempMonitor.Common;
 using ComputeServerTempMonitor.Discord;
+using ComputeServerTempMonitor.NewRelic;
+using ComputeServerTempMonitor.NewRelic.Models;
 using ComputeServerTempMonitor.Oobabooga.Models;
 using ComputeServerTempMonitor.Software;
 using Discord.Net;
@@ -486,7 +488,11 @@ namespace ComputeServerTempMonitor.Oobabooga
                     }
                 }
                 existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), existingMsgId, true);
-                DiscordMain.AddLLMUsage(CurrentChats[id].Username, resp.usage.prompt_tokens, resp.usage.completion_tokens); 
+                DiscordMain.AddLLMUsage(CurrentChats[id].Username, resp.usage.prompt_tokens, resp.usage.completion_tokens);
+                NewRelicMain.Log(new Metric() { name = "llm.total.prompttokens", value = resp.usage.prompt_tokens });
+                NewRelicMain.Log(new Metric() { name = "llm.total.completiontokens", value = resp.usage.prompt_tokens });
+                NewRelicMain.Log(new Metric() { name = $"llm.{CurrentChats[id].Username.ToLower()}.prompttokens", value = resp.usage.prompt_tokens });
+                NewRelicMain.Log(new Metric() { name = $"llm.{CurrentChats[id].Username.ToLower()}.completiontokens", value = resp.usage.prompt_tokens });
                 CurrentChats[id].IsGenerating = false;
             }
             else
@@ -503,6 +509,10 @@ namespace ComputeServerTempMonitor.Oobabooga
                 {
                     totalMessage.Append(resp.choices[0].message.content);
                     DiscordMain.AddLLMUsage(CurrentChats[id].Username, resp.usage.prompt_tokens, resp.usage.completion_tokens);
+                    NewRelicMain.Log(new Metric(){ name = "llm.total.prompttokens", value = resp.usage.prompt_tokens });
+                    NewRelicMain.Log(new Metric() { name = "llm.total.completiontokens", value = resp.usage.prompt_tokens });
+                    NewRelicMain.Log(new Metric() { name = $"llm.{CurrentChats[id].Username.ToLower()}.prompttokens", value = resp.usage.prompt_tokens });
+                    NewRelicMain.Log(new Metric() { name = $"llm.{CurrentChats[id].Username.ToLower()}.completiontokens", value = resp.usage.prompt_tokens });
                 }
                 existingMsgId = await DiscordMain.SendThreadMessage(id, totalMessage.ToString(), null, true);
                 CurrentChats[id].IsGenerating = false;

@@ -98,7 +98,7 @@ namespace ComputeServerTempMonitor.Discord
             {
                 // delete archived ones?
                 SharedContext.Instance.Log(LogLevel.WARN, "Discord.ThreadUpdated", "Thread has been archived.");
-                await arg2.SendMessageAsync("Conversation ended: " + DateTime.Now.ToString());
+                //await arg2.SendMessageAsync("Conversation ended: " + DateTime.Now.ToString());
                 var guild = _client.GetGuild(arg2.Guild.Id);
                 await arg2.RemoveUserAsync(guild.CurrentUser);
                 await OobaboogaMain.DeleteChat(arg2.Id);
@@ -354,6 +354,57 @@ namespace ComputeServerTempMonitor.Discord
                 WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
                 switch (parts[0])
                 {
+                    case "statrefresh":
+                        {
+                            await arg.DeferAsync();
+                            ComponentBuilder cb = new ComponentBuilder();
+                            ActionRowBuilder arb = new ActionRowBuilder();
+                            ButtonBuilder bref = new ButtonBuilder($"Refresh", $"statrefresh:x", ButtonStyle.Success, null, new Emoji("♻"), false, null);
+                            arb.AddComponent(bref.Build());
+                            cb.AddRow(arb);
+
+                            StringBuilder sb = new StringBuilder();
+                            sb.AppendLine($"Status {DateTime.Now}:\n```");
+                            sb.AppendLine(HardwareMain.GetStatus());
+                            sb.AppendLine(SoftwareMain.GetStatus());
+                            sb.AppendLine("```");
+                            await arg.Message.ModifyAsync((s) =>
+                            {
+                                s.Content = sb.ToString();
+                                s.Components = cb.Build();
+                            });
+                        }
+                        return;
+                    case "camrefresh":
+                        {
+                            await arg.DeferAsync();
+                            Task.Run(async () =>
+                            {
+
+                                string fn = await IoTMain.GetCameraFrame(parts[1]);
+                                if (fn != "" && File.Exists(fn))
+                                {
+                                    // generate a refresh button
+                                    ComponentBuilder cb = new ComponentBuilder();
+                                    ActionRowBuilder arb = new ActionRowBuilder();
+                                    ButtonBuilder bref = new ButtonBuilder($"Refresh", $"camrefresh:{parts[1]}", ButtonStyle.Success, null, new Emoji("♻"), false, null);
+                                    arb.AddComponent(bref.Build());
+                                    cb.AddRow(arb);
+
+                                    await arg.Message.ModifyAsync((s) =>
+                                    {
+                                        s.Content = $"Camera frame for '{parts[1]}' requested by {arg.User.Mention} at {DateTime.Now.ToString()}";
+                                        s.Attachments = new List<FileAttachment>()
+                                            {
+                                            new FileAttachment(fn)
+                                            };
+                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        s.Components = cb.Build();
+                                    });
+                                }
+                            }, cancellationToken);
+                        }
+                        return;
                     case "continue":
                         {
                             arg.DeferAsync();
@@ -966,6 +1017,7 @@ namespace ComputeServerTempMonitor.Discord
                         // start a new chat
                         string charName = "";
                         string systemPrompt = "";
+                        string title = "";
                         foreach (var op in command.Data.Options)
                         {
                             switch (op.Name)
@@ -975,6 +1027,9 @@ namespace ComputeServerTempMonitor.Discord
                                     break;
                                 case "system_prompt":
                                     systemPrompt = (string)op.Value;
+                                    break;
+                                case "title":
+                                    title = (string)op.Value;
                                     break;
                             }
                         }
@@ -1003,7 +1058,9 @@ namespace ComputeServerTempMonitor.Discord
                                     }
                                 }
                                 await command.DeferAsync();
-                                SocketThreadChannel stc = await textChannel.CreateThreadAsync(SharedContext.Instance.GetConfig().Oobabooga.DisplayCharacters[charName].DisplayName, ((bool)discordInfo.GetPreference(command.GuildId, PreferenceNames.CreatePrivateThreads) ? ThreadType.PrivateThread : ThreadType.PublicThread));
+                                if (title == "")
+                                    title = SharedContext.Instance.GetConfig().Oobabooga.DisplayCharacters[charName].DisplayName;
+                                SocketThreadChannel stc = await textChannel.CreateThreadAsync(title, ((bool)discordInfo.GetPreference(command.GuildId, PreferenceNames.CreatePrivateThreads) ? ThreadType.PrivateThread : ThreadType.PublicThread), ThreadArchiveDuration.OneWeek);
                                 using (stc.EnterTypingState())
                                 {
                                     // add the user to the private chat we've just created
@@ -1073,12 +1130,25 @@ namespace ComputeServerTempMonitor.Discord
             switch (command.Data.Name)
             {
                 case "status":
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine($"Status {DateTime.Now}:\n```");
-                    sb.AppendLine(HardwareMain.GetStatus());
-                    sb.AppendLine(SoftwareMain.GetStatus());
-                    sb.AppendLine("```");
-                    await command.RespondAsync(sb.ToString());
+                    try
+                    {
+                        ComponentBuilder cb = new ComponentBuilder();
+                        ActionRowBuilder arb = new ActionRowBuilder();
+                        ButtonBuilder bref = new ButtonBuilder($"Refresh", $"statrefresh:x", ButtonStyle.Success, null, new Emoji("♻"), false, null);
+                        arb.AddComponent(bref.Build());
+                        cb.AddRow(arb);
+
+                        StringBuilder sb = new StringBuilder();
+                        sb.AppendLine($"Status {DateTime.Now}:\n```");
+                        sb.AppendLine(HardwareMain.GetStatus());
+                        sb.AppendLine(SoftwareMain.GetStatus());
+                        sb.AppendLine("```");
+                        await command.RespondAsync(sb.ToString(), null, false, false, null, cb.Build());
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine(ex.ToString());
+                    }
                     return;
 
             }
@@ -1113,6 +1183,13 @@ namespace ComputeServerTempMonitor.Discord
                                     string fn = await IoTMain.GetCameraFrame(target);
                                     if (fn != "" && File.Exists(fn))
                                     {
+                                        // generate a refresh button
+                                        ComponentBuilder cb = new ComponentBuilder();
+                                        ActionRowBuilder arb = new ActionRowBuilder();
+                                        ButtonBuilder bref = new ButtonBuilder($"Refresh", $"camrefresh:{target}", ButtonStyle.Success, null, new Emoji("♻"), false, null);
+                                        arb.AddComponent(bref.Build());
+                                        cb.AddRow(arb);
+
                                         await command.ModifyOriginalResponseAsync((s) =>
                                         {
                                             s.Content = $"Camera frame for '{target}' requested by {command.User.Mention} at {DateTime.Now.ToString()}";
@@ -1121,6 +1198,7 @@ namespace ComputeServerTempMonitor.Discord
                                             new FileAttachment(fn)
                                             };
                                             s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                            s.Components = cb.Build();
                                         });
                                     }
                                 }, cancellationToken);
@@ -1146,7 +1224,7 @@ namespace ComputeServerTempMonitor.Discord
                         Task.Run(async () =>
                         {
                             await OobaboogaMain.LoadModel(model);
-                            await command.RespondAsync($"Load LLM model is now '{OobaboogaMain.GetLoadedModel()}'");
+                            await command.ModifyOriginalResponseAsync(s => s.Content = $"Load LLM model is now '{OobaboogaMain.GetLoadedModel().Result}'");
                         }, cancellationToken);
                         return;
                     }
@@ -1466,6 +1544,7 @@ namespace ComputeServerTempMonitor.Discord
                 .WithName("chat")
                 .WithDescription("Starts a conversation with the LLM in a new thread")
                 .AddOption(characters) // there will be others here? maybe?
+                .AddOption("title", ApplicationCommandOptionType.String, "The title / topic for this chat", false)
                 .AddOption("system_prompt", ApplicationCommandOptionType.String, "The system prompt to use for this conversation", false);
 
             var llmAskCommands = new SlashCommandBuilder()
@@ -1515,6 +1594,25 @@ namespace ComputeServerTempMonitor.Discord
                                 }
                                 modelList.IsRequired = field.Value.Required;
                                 flowCommand.AddOption(modelList);
+                            }
+                            break;
+                        case "List<unets>":
+                            {
+                                List<string> models = ComfyMain.GetCheckpoints(SharedContext.Instance.GetConfig().ComfyUI.Paths.Unets);
+                                int count = 0;
+                                var unetList = new SlashCommandOptionBuilder()
+                                    .WithName("unet")
+                                    .WithType(ApplicationCommandOptionType.String)
+                                    .WithDescription("Model");
+                                foreach (string m in models)
+                                {
+                                    unetList.AddChoice(m, m);
+                                    count++;
+                                    if (count >= commandLimit)
+                                        break;
+                                }
+                                unetList.IsRequired = field.Value.Required;
+                                flowCommand.AddOption(unetList);
                             }
                             break;
                         case "List<lora>":

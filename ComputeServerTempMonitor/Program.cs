@@ -8,6 +8,8 @@ using ComputeServerTempMonitor.Oobabooga;
 using ComputeServerTempMonitor.Oobabooga.Models;
 using Newtonsoft.Json;
 using ComputeServerTempMonitor.IoT;
+using System.Threading;
+using ComputeServerTempMonitor.NewRelic;
 
 namespace ComputeServerTempMonitor;
 
@@ -56,6 +58,7 @@ class Program
         HardwareMain.Exit();
         SoftwareMain.Exit();
         IoTMain.Exit();
+        NewRelicMain.Exit();
     }
 
     static async Task Main(string[] args)
@@ -70,6 +73,7 @@ class Program
         {
             SharedContext.Instance.LoadConfig(configFile);
 
+            NewRelicMain.Init(cancellationTokenSource.Token); // FILO
             HardwareMain.Init(cancellationTokenSource.Token);
             SoftwareMain.Init(cancellationTokenSource.Token);
             DiscordMain.Init(cancellationTokenSource.Token);
@@ -81,6 +85,31 @@ class Program
         {
             SharedContext.Instance.Log(LogLevel.ERR, "Main", ex.ToString());
         }
+
+        // data logging control thread
+        Task tLog = new Task(async () =>
+        {
+            Thread.Sleep(15000); // wait for boot
+            while (!cancellationTokenSource.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    Dictionary<string, object>? stats;
+                    stats = HardwareMain.GetMonitoring();
+                    if (stats != null)
+                        SharedContext.Instance.LogMetrics("BotHardware", stats);
+                    //stats = SoftwareMain.GetMonitoring();
+                    //if (stats != null)
+                    //    SharedContext.Instance.LogMetrics("BotSoftware", stats);
+                }
+                catch (Exception ex)
+                {
+                    SharedContext.Instance.Log(LogLevel.WARN, "NewRelic", "Unable to send stats to New Relic: " + ex.ToString());
+                }
+                Thread.Sleep(15000);
+            }
+        }, cancellationTokenSource.Token);
+        tLog.Start();
 
         // put in our external control loop here
         // it'll be a state-machine with the current mode

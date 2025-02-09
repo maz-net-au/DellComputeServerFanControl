@@ -1,9 +1,11 @@
-﻿using Discord;
+﻿using ComputeServerTempMonitor.NewRelic;
+using ComputeServerTempMonitor.NewRelic.Models;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Net;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -15,6 +17,7 @@ namespace ComputeServerTempMonitor.Common
 
         private static SharedContext instance = null;
         private static object syncRoot = new object();
+        private static HttpClient webClient = new HttpClient();
 
         private Config _config = new Config();
         public static SharedContext Instance
@@ -34,6 +37,8 @@ namespace ComputeServerTempMonitor.Common
                 return instance;
             }
         }
+
+        
 
         public Config GetConfig()
         {
@@ -64,6 +69,18 @@ namespace ComputeServerTempMonitor.Common
         {
             // a threadsafe queue
             Console.WriteLine($"{DateTime.Now.ToString("s")}\t{Enum.GetName(lvl).PadRight(4, ' ')}\t{source}: {message}");
+            if (_config.NewRelic.ForwardLogs)
+                NewRelicMain.Log(new LogMessage() { message = message, level = Enum.GetName(lvl) });
+        }
+
+        public void LogMetrics(string eventType, Dictionary<string, object> metrics)
+        {
+            metrics["eventType"] = eventType;
+            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, _config.NewRelic.URLs.Events);
+            req.Headers.Add("Api-Key", _config.NewRelic.LicenseKey);
+            req.Content = new StringContent(JsonConvert.SerializeObject(metrics), System.Text.Encoding.UTF8, "application/json");
+            HttpResponseMessage hrm = webClient.SendAsync(req).Result;
+            //Console.WriteLine(hrm.StatusCode + "\n" + hrm.Content.ReadAsStringAsync().Result);
         }
 
         public static List<string> ExecuteCLI(string command, string args)

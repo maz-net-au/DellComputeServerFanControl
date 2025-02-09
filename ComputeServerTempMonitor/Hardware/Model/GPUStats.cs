@@ -23,5 +23,8 @@ namespace ComputeServerTempMonitor.Hardware.Model
         public uint FanSpeed { get; set; } = 0;
         public uint RequestedFanSpeed { get; set; } = 0;
         public uint PowerConsumption { get; set; } = 0;
+        public uint MemoryClock { get; set; } = 0;
+        public uint ProcessorClock { get; set; } = 0;
+        public uint UsedVRAM { get; set; } = 0;
     }
 }

@@ -33,6 +33,7 @@ namespace ComputeServerTempMonitor.Common
         public ComfyUIConfig ComfyUI { get; set; } = new ComfyUIConfig();
         public OobaboogaConfig Oobabooga { get; set; } = new OobaboogaConfig();
         public mIoTSettings mIoT { get; set; } = new mIoTSettings();
+        public NewRelicConfig NewRelic { get; set; } = new NewRelicConfig();
     }
     public class FanTempSpeeds
     {
@@ -55,9 +56,26 @@ namespace ComputeServerTempMonitor.Common
         public ComfyPathsConfig Paths { get; set; } = new ComfyPathsConfig();
         public ComfyUISettings Settings { get; set; }
     }
+    public class NewRelicConfig
+    {
+        public string LicenseKey { get; set; } = "";
+        public int PushInterval { get; set; } = 15;
+        public uint MaxPayloadSize { get; set; } = 1000000;
+        public bool ForwardLogs { get; set; } = false;
+        public bool EnableSending { get; set; } = true;
+        public NewRelicURLsConfig URLs { get; set; } = new NewRelicURLsConfig();
+    }
+    public class NewRelicURLsConfig
+    {
+        public string Events { get; set; }
+        public string Metrics { get; set; }
+        public string Logs { get; set; }
+    }
+
     public class ComfyPathsConfig
     {
         public string Checkpoints { get; set; }
+        public string Unets { get; set; }
         public string LoRAs { get; set; }
         public string Prompts { get; set; }
         public string Temp { get; set; }
