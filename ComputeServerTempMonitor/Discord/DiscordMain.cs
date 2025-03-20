@@ -5,25 +5,20 @@ using ComputeServerTempMonitor.Discord.Models;
 using Discord;
 using Discord.WebSocket;
 using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text;
-using System.Threading.Tasks;
 using ImageMagick;
-using ComputeServerTempMonitor.Hardware.Model;
 using ComputeServerTempMonitor.Software;
 using ComputeServerTempMonitor.Software.Models;
 using Discord.Net;
 using ComputeServerTempMonitor.Hardware;
 using ComputeServerTempMonitor.Oobabooga;
 using ComputeServerTempMonitor.Oobabooga.Models;
-using System.Reactive;
-using System.Reflection;
-using System.Security.Cryptography;
-using Discord.Interactions;
 using ComputeServerTempMonitor.IoT;
-using System.Xml.Linq;
+using ComputeServerTempMonitor.Kokoro;
+using ComputeServerTempMonitor.Zonos;
+using Discord.Audio;
+using ComputeServerTempMonitor.Anthropic;
+using Discord.Rest;
 
 namespace ComputeServerTempMonitor.Discord
 {
@@ -35,13 +30,15 @@ namespace ComputeServerTempMonitor.Discord
         const string userFile = "data/discordUsers.json";
         const string usageFile = "data/discordUsage.json";
         const string tempDir = "temp/llm/";
+        // store the audio channels, one per guild?
+        static Dictionary<ulong, AudioStreamer> VoiceChannels = new Dictionary<ulong, AudioStreamer>();
         static CancellationToken cancellationToken;
 
         public static async Task InitBot()
         {
             _client = new DiscordSocketClient(new DiscordSocketConfig()
             {
-                GatewayIntents = GatewayIntents.MessageContent | GatewayIntents.AllUnprivileged
+                GatewayIntents = GatewayIntents.MessageContent | GatewayIntents.AllUnprivileged | GatewayIntents.GuildVoiceStates
             });
             _client.Log += DiscordLogger;
             _client.Ready += Client_Ready;
@@ -101,14 +98,26 @@ namespace ComputeServerTempMonitor.Discord
                 //await arg2.SendMessageAsync("Conversation ended: " + DateTime.Now.ToString());
                 var guild = _client.GetGuild(arg2.Guild.Id);
                 await arg2.RemoveUserAsync(guild.CurrentUser);
-                await OobaboogaMain.DeleteChat(arg2.Id);
+                //await OobaboogaMain.DeleteChat(arg2.Id);
+            }
+        }
+
+        public static async Task SendMessage(ulong channel, string message)
+        {
+            SocketTextChannel c = await _client.GetChannelAsync(channel) as SocketTextChannel;
+            if (c != null)
+            {
+                await c.SendMessageAsync(message);
             }
         }
 
         private static async Task ThreadDeleted(Cacheable<SocketThreadChannel, ulong> arg)
         {
             // just delete the chat history
-            await OobaboogaMain.DeleteChat(arg.Id);
+            if (OobaboogaMain.FindExistingChat(null, arg.Id) != null)
+                await OobaboogaMain.DeleteChat(arg.Id);
+            else if (ClaudeMain.FindExistingChat(arg.Id) != null)
+                await ClaudeMain.DeleteChat(arg.Id);
         }
 
         public static void LoadUsers()
@@ -475,8 +484,15 @@ namespace ComputeServerTempMonitor.Discord
                             {
                                 if (arg.Channel is SocketThreadChannel threadChannel)
                                 {
-                                    if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, threadChannel.Id) != null)
+                                    if (OobaboogaMain.FindExistingChat(null, threadChannel.Id) != null)
+                                    {
+                                        if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl || OobaboogaMain.FindExistingChat(arg.User.GlobalName, threadChannel.Id) != null)
+                                            await threadChannel.DeleteAsync();
+                                    }
+                                    else if (ClaudeMain.FindExistingChat(threadChannel.Id) != null)
+                                    {
                                         await threadChannel.DeleteAsync();
+                                    }
                                 }
                             }, cancellationToken);
                         }
@@ -706,7 +722,7 @@ namespace ComputeServerTempMonitor.Discord
                     return;
                 Task.Run(async () =>
                 {
-                    if (arg2.Content == "")
+                    if (arg2.Content == "" && arg2.Attachments.Count == 0)
                     {
                         SharedContext.Instance.Log(LogLevel.WARN, "DiscordMain", "Unable to read message content. Probably a permissions error");
                     }
@@ -735,7 +751,7 @@ namespace ComputeServerTempMonitor.Discord
                 {
                     // truncate and attach files later
                     string alert = "\n\n --- message too long. Full response will be attached shortly ---";
-                    msg = msg.Substring(0, 2000 - alert.Length);
+                    msg = msg.Substring(0, 2000 - alert.Length) + alert;
                 }
                 else
                 {
@@ -748,7 +764,9 @@ namespace ComputeServerTempMonitor.Discord
                     string filename = $"{tempDir}{DateTime.Now.Ticks / TimeSpan.TicksPerMillisecond}-{new Random().Next(999999):000000}.txt";
                     File.WriteAllText(filename, msg);
                     attachments.Add(new FileAttachment(filename));
-                    msg = "Response exceeded max length. See attachment.";
+                    string alert = "\n\n --- message too long. Full response attached ---";
+                    msg = msg.Substring(0, 2000 - alert.Length) + alert; ;
+                    //msg = "Response exceeded max length. See attachment.";
                 }
             }
             try
@@ -773,6 +791,11 @@ namespace ComputeServerTempMonitor.Discord
                     }
                     else
                     {
+                        bool doStop = false;
+                        if (OobaboogaMain.FindExistingChat(null, threadChannel.Id) != null)
+                        {
+                            doStop = true;
+                        }
                         ComponentBuilder cb = new ComponentBuilder();
                         ActionRowBuilder arb = new ActionRowBuilder();
                         ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
@@ -781,12 +804,12 @@ namespace ComputeServerTempMonitor.Discord
                         ulong resultId = 0;
                         if (attachments.Count > 0)
                         {
-                            var res = await threadChannel.SendFilesAsync(attachments, msg, false, null, null, null, null, cb.Build());
+                            var res = await threadChannel.SendFilesAsync(attachments, msg, false, null, null, null, null, (doStop ? cb.Build() : null));
                             resultId = res.Id;
                         }
                         else
                         {
-                            var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, cb.Build());
+                            var res = await threadChannel.SendMessageAsync(msg, false, null, null, null, null, (doStop ? cb.Build() : null));
                             resultId = res.Id;
                         }
                         if (finished)
@@ -808,29 +831,32 @@ namespace ComputeServerTempMonitor.Discord
             {
                 var messages = await threadChannel.GetMessagesAsync(10).FlattenAsync();
                 bool latest = true;
-                foreach (var message in messages)
+                if (OobaboogaMain.FindExistingChat(null, threadChannel.Id) != null)
                 {
-                    ComponentBuilder cb = new ComponentBuilder();
-                    ActionRowBuilder arb = new ActionRowBuilder();
-                    if (latest && _client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
+                    foreach (var message in messages)
                     {
-                        latest = false;
-                        // add regen, remove, edit buttons
-                        ButtonBuilder bbreg = new ButtonBuilder($"Regen", $"llmregenerate:{threadChannel.Id},{message.Id}", ButtonStyle.Primary, null, new Emoji("♻"), false, null);
-                        ButtonBuilder bbcont = new ButtonBuilder($"Cont.", $"continue:{threadChannel.Id},{message.Id}", ButtonStyle.Success, null, new Emoji("➡"), false, null);
-                        ButtonBuilder bbedit = new ButtonBuilder($"Edit", $"edit:{threadChannel.Id},{message.Id}", ButtonStyle.Secondary, null, new Emoji("✂"), false, null);
-                        ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
-                        arb.AddComponent(bbreg.Build());
-                        arb.AddComponent(bbcont.Build());
-                        arb.AddComponent(bbedit.Build());
-                        arb.AddComponent(bbdel.Build());
-                        cb.AddRow(arb);
-                        await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = cb.Build(); });
-                    }
-                    else if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.RemovePreviousControls)
-                    {
-                        if (_client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
-                            await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = new ComponentBuilder().Build(); });
+                        ComponentBuilder cb = new ComponentBuilder();
+                        ActionRowBuilder arb = new ActionRowBuilder();
+                        if (latest && _client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
+                        {
+                            latest = false;
+                            // add regen, remove, edit buttons
+                            ButtonBuilder bbreg = new ButtonBuilder($"Regen", $"llmregenerate:{threadChannel.Id},{message.Id}", ButtonStyle.Primary, null, new Emoji("♻"), false, null);
+                            ButtonBuilder bbcont = new ButtonBuilder($"Cont.", $"continue:{threadChannel.Id},{message.Id}", ButtonStyle.Success, null, new Emoji("➡"), false, null);
+                            ButtonBuilder bbedit = new ButtonBuilder($"Edit", $"edit:{threadChannel.Id},{message.Id}", ButtonStyle.Secondary, null, new Emoji("✂"), false, null);
+                            ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
+                            arb.AddComponent(bbreg.Build());
+                            arb.AddComponent(bbcont.Build());
+                            arb.AddComponent(bbedit.Build());
+                            arb.AddComponent(bbdel.Build());
+                            cb.AddRow(arb);
+                            await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = cb.Build(); });
+                        }
+                        else if (SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.RemovePreviousControls)
+                        {
+                            if (_client.CurrentUser != null && message?.Author?.Id == _client.CurrentUser.Id && message.Type == MessageType.Default)
+                                await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = new ComponentBuilder().Build(); });
+                        }
                     }
                 }
                 ComponentBuilder cbt = new ComponentBuilder();
@@ -864,27 +890,62 @@ namespace ComputeServerTempMonitor.Discord
             {
                 if (arg.Channel is SocketThreadChannel threadChannel)
                 {
-                    // only the correct user can send messages to their instance of a thread
-                    if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && OobaboogaMain.FindExistingChat(arg.Author.GlobalName, threadChannel.Id) == null)
-                        return;
-                    Task.Run(async () =>
+                    ChatHistory ch = OobaboogaMain.FindExistingChat(null, threadChannel.Id);
+                    if (ch != null)
                     {
-                        using (threadChannel.EnterTypingState())
+                        // only the correct user can send messages to their instance of a thread
+                        if (!SharedContext.Instance.GetConfig().Oobabooga.DefaultParams.AllowOtherUsersControl && ch.Username != arg.Author.GlobalName)
+                            return;
+                        Task.Run(async () =>
                         {
-                            if (arg.Content == "")
+                            using (threadChannel.EnterTypingState())
                             {
-                                SharedContext.Instance.Log(LogLevel.WARN, "DiscordMain", "Unable to read message content.");
-                            }
-                            else
-                            {
-                                SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM reply received from {arg.Author.GlobalName}.");
-                                if (!await OobaboogaMain.Reply(arg.Channel.Id, arg.Id, arg.Content))
+                                if (arg.Content == "" && arg.Attachments.Count == 0)
                                 {
-                                    await threadChannel.SendMessageAsync("This conversation has ended.");
+                                    SharedContext.Instance.Log(LogLevel.WARN, "DiscordMain", "Unable to read message content.");
+                                }
+                                else
+                                {
+                                    SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"LLM reply received from {arg.Author.GlobalName}.");
+                                    if (!await OobaboogaMain.Reply(arg.Channel.Id, arg.Id, arg.Content))
+                                    {
+                                        await threadChannel.SendMessageAsync("This conversation has ended.");
+                                    }
                                 }
                             }
-                        }
-                    }, cancellationToken);
+                        }, cancellationToken);
+                    }
+                    else if (ClaudeMain.FindExistingChat(threadChannel.Id) != null)
+                    {
+                        Task.Run(async () =>
+                        {
+                            using (threadChannel.EnterTypingState())
+                            {
+                                if (arg.Content == "" && arg.Attachments.Count == 0)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.WARN, "DiscordMain", "Unable to read message content.");
+                                }
+                                else
+                                {
+                                    SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"Claude reply received from {arg.Author.GlobalName}.");
+                                    // get all these attachments and make a list of their names
+                                    List<string> attachmentPaths = new List<string>();
+                                    if (arg.Attachments.Count > 0)
+                                    {
+                                        foreach (Attachment a in arg.Attachments)
+                                        {
+                                            attachmentPaths.Add(await ClaudeMain.DownloadAttachment(a.Url, threadChannel.Id, Path.GetExtension(a.Filename).ToLower().Trim('.')));
+                                        }
+                                    }
+                                    await ClaudeMain.AddMessage(threadChannel.Id, arg.Content, attachmentPaths);
+                                }
+                            }
+                        }, cancellationToken);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Conversation not found: " + threadChannel.Id);
+                    }
                 }
             }
         }
@@ -1058,36 +1119,45 @@ namespace ComputeServerTempMonitor.Discord
                                     }
                                 }
                                 await command.DeferAsync();
-                                if (title == "")
-                                    title = SharedContext.Instance.GetConfig().Oobabooga.DisplayCharacters[charName].DisplayName;
-                                SocketThreadChannel stc = await textChannel.CreateThreadAsync(title, ((bool)discordInfo.GetPreference(command.GuildId, PreferenceNames.CreatePrivateThreads) ? ThreadType.PrivateThread : ThreadType.PublicThread), ThreadArchiveDuration.OneWeek);
-                                using (stc.EnterTypingState())
+                                try
                                 {
-                                    // add the user to the private chat we've just created
-                                    if (guild != null)
+                                    if (title == "")
+                                        title = SharedContext.Instance.GetConfig().Oobabooga.DisplayCharacters[charName].DisplayName;
+                                    SharedContext.Instance.Log(LogLevel.INFO, "Discord", "Creating new thread");
+                                    SocketThreadChannel stc = await textChannel.CreateThreadAsync(title, ((bool)(discordInfo.GetPreference(command.GuildId, PreferenceNames.CreatePrivateThreads) ?? false) ? ThreadType.PrivateThread : ThreadType.PublicThread), ThreadArchiveDuration.OneWeek);
+                                    using (stc.EnterTypingState())
                                     {
-                                        IGuildUser usr = guild.GetUser(command.User.Id);
-                                        await stc.AddUserAsync(usr);
-                                    }
-                                    ChatHistory res = await OobaboogaMain.InitChat(command.User.GlobalName, charName, systemPrompt, stc.Id, stc.Guild.Id);
-
-                                    if (res != null)
-                                    {
-                                        if (res.Greeting != null && res.Greeting != "")
+                                        // add the user to the private chat we've just created
+                                        if (guild != null)
                                         {
-                                            res.Greeting = "Conversation begins";
+                                            IGuildUser usr = guild.GetUser(command.User.Id);
+                                            await stc.AddUserAsync(usr);
                                         }
-                                        // await stc.SendMessageAsync(res.Greeting);
-                                        //// this should add the delete thread button
-                                        //await UpdateThreadControls(stc);
-                                        await SendThreadMessage(stc.Id, res.Greeting, null, true);
-                                        await command.DeleteOriginalResponseAsync();
-                                    }
-                                    else
-                                    {
-                                        await command.RespondAsync("Unable to start chat.", null, false, true);
+                                        //SharedContext.Instance.Log(LogLevel.INFO, "Discord", "Creating new chat history");
+                                        ChatHistory res = await OobaboogaMain.InitChat(command.User.GlobalName, charName, systemPrompt, stc.Id, stc.Guild.Id);
+
+                                        if (res != null)
+                                        {
+                                            if (res.Greeting != null && res.Greeting != "")
+                                            {
+                                                res.Greeting = "Conversation begins";
+                                            }
+                                            // await stc.SendMessageAsync(res.Greeting);
+                                            //// this should add the delete thread button
+                                            //await UpdateThreadControls(stc);
+                                            await SendThreadMessage(stc.Id, res.Greeting, null, true);
+                                            await command.DeleteOriginalResponseAsync();
+                                        }
+                                        else
+                                        {
+                                            await command.RespondAsync("Unable to start chat.", null, false, true);
+                                        }
                                     }
                                 }
+                                catch (Exception ex) {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Discord", ex.ToString());
+                                }
+
                             }
                         }, cancellationToken);
                     }
@@ -1121,6 +1191,222 @@ namespace ComputeServerTempMonitor.Discord
                                 LLMResponse res = await OobaboogaMain.Ask(request, systemPrompt);
                                 AddLLMUsage(command.User.GlobalName, res.PromptTokens, res.CompletionTokens);
                                 await command.ModifyOriginalResponseAsync(s => s.Content = res.Message);
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
+                case "chat_claude":
+                    {
+                        string preset = "Default";
+                        foreach (var op in command.Data.Options)
+                        {
+                            switch (op.Name)
+                            {
+                                case "preset":
+                                    preset = (string)op.Value;
+                                    break;
+                            }
+                        }
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                if (command.Channel is SocketTextChannel textChannel)
+                                {
+                                    await command.DeferAsync();
+                                    await command.ModifyOriginalResponseAsync(s => s.Content = "Starting a chat with Claude");
+                                    SocketThreadChannel stc = await textChannel.CreateThreadAsync("Anthropic's Claude", ((bool)(discordInfo.GetPreference(command.GuildId, PreferenceNames.CreatePrivateThreads) ?? false) ? ThreadType.PrivateThread : ThreadType.PublicThread), ThreadArchiveDuration.OneHour);
+                                    bool res = await ClaudeMain.StartConversation(stc.Id, preset);
+                                    // add a new message
+                                    await command.DeleteOriginalResponseAsync();
+                                }
+                                return;
+
+                            }
+                            catch (Exception ex)
+                            {
+                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'chat_claude': " + ex.ToString());
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
+                case "tts":
+                    {
+                        // AI stuff!
+                        string text = "";
+                        string charName = "";
+                        double speed = 1.0d;
+                        string lang_code = "b";
+                        foreach (var op in command.Data.Options)
+                        {
+                            switch (op.Name)
+                            {
+                                case "text":
+                                    text = (string)op.Value;
+                                    break;
+                                case "character":
+                                    charName = (string)op.Value;
+                                    break;
+                                case "speed":
+                                    speed = (double)op.Value;
+                                    break;
+                                case "language":
+                                    lang_code = (string)op.Value;
+                                    break;
+                            }
+                        }
+                        if (text == "")
+                        {
+                            await command.RespondAsync($"Text is mandatory.", null, false, true);
+                            return;
+                        }
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await command.DeferAsync();
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Generating voice. Please wait...");
+                                string audioFile=await KokoroMain.Generate(text, charName, speed, lang_code);
+                                // add a new message
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Uploading audio. Please wait...");
+                                await command.ModifyOriginalResponseAsync((s) =>
+                                {
+                                    s.Content = $"TTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
+                                    s.Attachments = new List<FileAttachment>()
+                                            {
+                                            new FileAttachment(audioFile)
+                                            };
+                                    s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                });
+                                // need to retrieve the audio and do the embed?
+                                // does it need the text as well?
+                                //await command.ModifyOriginalResponseAsync(s => s.Content = res.Message);
+                                return;
+                            }
+                            catch (Exception ex)
+                            {
+                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts': " + ex.ToString());
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
+                case "tts_zonos":
+                    {
+                        string text = "";
+                        double speed = 1.0d;
+                        string lang_code = "en-us";
+                        byte[] voice_sample = null;
+#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await command.DeferAsync();
+                                foreach (var op in command.Data.Options)
+                                {
+                                    switch (op.Name)
+                                    {
+                                    case "voice_sample":
+                                        {
+                                            Attachment? attch = (op.Value as Attachment);
+                                            if (attch != null)
+                                            {
+                                                voice_sample = await ZonosAPIMain.DownloadAudioSample(attch.Url);
+                                                SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Retrieved voice sample {voice_sample.Length / 1000000}mb");
+                                            }
+                                        }
+                                        break;
+                                    case "voice_preset":
+                                        {
+                                            string pp = SharedContext.Instance.GetConfig().Zonos.Paths.Presets + (string)op.Value;
+                                            if (File.Exists(pp))
+                                            {
+                                                voice_sample = File.ReadAllBytes(pp);
+                                            }
+                                        }
+                                        break;
+                                    case "text":
+                                        text = (string)op.Value;
+                                        break;
+                                    case "speed":
+                                        speed = (double)op.Value;
+                                        break;
+                                    case "language":
+                                        lang_code = (string)op.Value;
+                                        break;
+                                    }
+                                }
+                                // call zonos here
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Generating voice. Please wait...");
+                                string audioFile = await ZonosAPIMain.Generate(text, speed, lang_code, voice_sample); // dunno what comes back yet
+                                // add a new message
+                                if (audioFile == "")
+                                {
+                                    // Zonos API failed
+                                    await command.ModifyOriginalResponseAsync(s => s.Content = "Zonos API failed. Please try again in a few minutes.");
+                                    return;
+                                }
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Uploading audio. Please wait...");
+                                await command.ModifyOriginalResponseAsync((s) =>
+                                {
+                                    s.Content = $"ZonosTTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
+                                    s.Attachments = new List<FileAttachment>()
+                                            {
+                                            new FileAttachment(audioFile)
+                                            };
+                                    s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                });
+                                return;
+                            }
+                            catch (Exception ex)
+                            {
+                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts_zonos': " + ex.ToString());
+                            }
+                        }, cancellationToken);
+#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+                    }
+                    return;
+                case "tts_add_preset":
+                    {
+                        string name = "";
+                        byte[] voice_sample = null;
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await command.DeferAsync();
+                                foreach (var op in command.Data.Options)
+                                {
+                                    switch (op.Name)
+                                    {
+                                        case "voice_sample":
+                                            {
+                                                Attachment? attch = (op.Value as Attachment);
+                                                if (attch != null)
+                                                {
+                                                    voice_sample = await ZonosAPIMain.DownloadAudioSample(attch.Url);
+                                                    SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Received voice preset {voice_sample.Length / 1000000}mb");
+                                                }
+                                            }
+                                            break;
+                                        case "name":
+                                            name = (string)op.Value;
+                                            break;
+                                    }
+                                }
+                                if (name != "" && voice_sample != null)
+                                {
+                                    bool replaced = false;
+                                    if (File.Exists(SharedContext.Instance.GetConfig().Zonos.Paths.Presets + name + ".mp3"))
+                                        replaced = true;
+                                    File.WriteAllBytes(SharedContext.Instance.GetConfig().Zonos.Paths.Presets + name + ".mp3", voice_sample);
+                                    await command.ModifyOriginalResponseAsync(s => s.Content = $"Preset '{name}' {(replaced?"replaced.": "uploaded. Please use /reregister to make it available.")}");
+                                }
+                                return;
+                            }
+                            catch (Exception ex)
+                            {
+                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts_add_preset': " + ex.ToString());
                             }
                         }, cancellationToken);
                     }
@@ -1160,6 +1446,115 @@ namespace ComputeServerTempMonitor.Discord
             // admin commands
             switch (command.Data.Name)
             {
+                case "voice":
+                    {
+                        Task.Run(async () =>
+                        {
+                            string action = "";
+                            IChannel channel = null;
+                            foreach (var op in command.Data.Options)
+                            {
+                                switch (op.Name)
+                                {
+                                    case "action":
+                                        action = (string)op.Value;
+                                        break;
+                                    case "channel":
+                                        channel = (IChannel)op.Value;
+                                        break;
+                                }
+                            }
+                            if (action == "" || channel == null)
+                            {
+                                await command.RespondAsync("Invalid actions selected for command 'voice'");
+                                return;
+                            }
+                            // got all the bits, do the thing
+                            try
+                            {
+                                if (action == "join")
+                                {
+                                    if (channel is SocketVoiceChannel voiceChannel) // maybe?
+                                    {
+                                        if (voiceChannel.ConnectedUsers.Contains(guild.CurrentUser))
+                                        {
+                                            await command.RespondAsync($"Already in voice channel, '{voiceChannel.Name}'");
+                                            return;
+                                        }
+                                        IAudioClient audioClient = await voiceChannel.ConnectAsync();
+                                        VoiceChannels[guild.Id] = new AudioStreamer(audioClient, cancellationToken);
+                                        SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Joined a voice channel, '{voiceChannel.Name}'");
+                                        await command.RespondAsync($"Joined a voice channel, '{voiceChannel.Name}'");
+                                    }
+                                }
+                                else if (action == "leave")
+                                {
+                                    if (channel is SocketVoiceChannel voiceChannel) // maybe?
+                                    {
+                                        await voiceChannel.DisconnectAsync();
+                                        if (VoiceChannels.ContainsKey(guild.Id))
+                                        {
+                                            // clean up streams and kill the Task
+                                            VoiceChannels[guild.Id].IsStreaming = false;
+                                            VoiceChannels.Remove(guild.Id);
+                                        }
+                                        SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Parted a voice channel, '{voiceChannel.Name}'");
+                                        await command.RespondAsync($"Parted a voice channel, '{voiceChannel.Name}'");
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Error executing 'voice' command: {ex}");
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
+                case "stream":
+                    {
+                        Task.Run(async () =>
+                        {
+                            command.DeferAsync();
+                            if (!VoiceChannels.ContainsKey(guild.Id))
+                            {
+                                await command.RespondAsync("Bot isn't in a voice channel in this server");
+                                return;
+                            }
+                            string action = "";
+                            string path = "";
+                            foreach (var op in command.Data.Options)
+                            {
+                                switch (op.Name)
+                                {
+                                    case "action":
+                                        action = (string)op.Value;
+                                        break;
+                                    case "path":
+                                        path = (string)op.Value;
+                                        break;
+                                }
+                            }
+                            if (action == "" || (action == "start" && (path == "" || !File.Exists(path))))
+                            {
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Invalid actions selected for command 'stream'");
+                                return;
+                            }
+                            // got all the bits, do the thing
+                            if (action == "enqueue")
+                            {
+                                if (VoiceChannels.ContainsKey(guild.Id))
+                                {
+                                    VoiceChannels[guild.Id].Enqueue(path);
+                                    await command.ModifyOriginalResponseAsync(s => s.Content = "File enqueued");
+                                }
+                            }
+                            else if (action == "stop")
+                            {
+                                
+                            }
+                        }, cancellationToken);
+                    }
+                    return;
                 case "iot":
                     {
                         var action = command.Data.Options?.First()?.Name;
@@ -1261,7 +1656,7 @@ namespace ComputeServerTempMonitor.Discord
                         {
                             case "add":
                                 {
-                                    if (server.HasValue && server.Value != discordInfo.OwnerServer)
+                                    if (server.HasValue && server.Value != SharedContext.Instance.GetConfig().DiscordOwnerServer)
                                     {
                                         if (discordInfo.Servers.ContainsKey(server.Value))
                                         {
@@ -1293,7 +1688,7 @@ namespace ComputeServerTempMonitor.Discord
                                 }
                             case "remove":
                                 {
-                                    if (server.HasValue && server.Value != discordInfo.OwnerServer)
+                                    if (server.HasValue && server.Value != SharedContext.Instance.GetConfig().DiscordOwnerServer)
                                     {
                                         if (discordInfo.Servers.ContainsKey(server.Value))
                                         {
@@ -1439,7 +1834,7 @@ namespace ComputeServerTempMonitor.Discord
 
         public static bool CommandAllowed(ulong serverId, string commands)
         {
-            return (serverId == discordInfo.OwnerServer || discordInfo.GlobalCommands.Contains(commands) || discordInfo.Servers[serverId].AllowedCommands.Contains(commands));
+            return (serverId == SharedContext.Instance.GetConfig().DiscordOwnerServer || discordInfo.GlobalCommands.Contains(commands) || discordInfo.Servers[serverId].AllowedCommands.Contains(commands));
         }
 
         public static async Task SendCommands(ulong updatedGuildId = 0)
@@ -1451,6 +1846,33 @@ namespace ComputeServerTempMonitor.Discord
             Dictionary<ulong, List<ApplicationCommandProperties>> guildCommands = new Dictionary<ulong, List<ApplicationCommandProperties>>();
 
             // set up some reusable command groups
+
+            // some streaming one for a voice channel
+            // /join channel_name
+            var voiceCommand = new SlashCommandBuilder()
+                .WithName("voice")
+                .WithDescription("Ask the bot to join / leave a voice channel")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("action")
+                    .WithDescription("What you want the bot to do")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true)
+                    .AddChoice("join", "join")
+                    .AddChoice("leave", "leave"))
+                .AddOption("channel", ApplicationCommandOptionType.Channel, "The voice channel you want the bot to join or leave", true, channelTypes: new List<ChannelType> { ChannelType.Voice });
+            // /stream action:start/stop path...
+            var streamCommand = new SlashCommandBuilder()
+                .WithName("stream")
+                .WithDescription("Control a stream of audio (or video?)")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("action")
+                    .WithDescription("What to do")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true)
+                    .AddChoice("enqueue", "enqueue")
+                    .AddChoice("stop", "stop"))
+                .AddOption("path", ApplicationCommandOptionType.String, "The path to the file you want to stream");
+
 
             var fansCommand = new SlashCommandBuilder()
                 .WithName("fans")
@@ -1515,6 +1937,21 @@ namespace ComputeServerTempMonitor.Discord
                     .WithRequired(true)
                     .AddChoice("admin", "admin")
                     .AddChoice("user", "user"));
+
+            var claudeProfiles = new SlashCommandOptionBuilder()
+                    .WithName("preset")
+                    .WithDescription("The preset to use for this chat")
+                    .WithRequired(true)
+                    .WithType(ApplicationCommandOptionType.String);
+            foreach (KeyValuePair<string, AnthropicPreset> claudeProfileItem in SharedContext.Instance.GetConfig().Anthropic.Presets)
+            {
+                claudeProfiles.AddChoice(claudeProfileItem.Value.DisplayName, claudeProfileItem.Key);
+            }
+
+            var claudeCommands = new SlashCommandBuilder()
+                    .WithName("chat_claude")
+                    .WithDescription("Chat with Anthropic's state of the art, vision capable AI model")
+                    .AddOption(claudeProfiles);
 
             var llmmodels = new SlashCommandOptionBuilder()
                     .WithName("model")
@@ -1683,6 +2120,101 @@ namespace ComputeServerTempMonitor.Discord
                 drawCommands.Add(flowCommand);
             }
 
+            var voiceList = new SlashCommandOptionBuilder()
+                .WithName("character")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithDescription("The character you want to read your text");
+            voiceList.AddChoice("Heart (American Female) A", "af_heart");
+            voiceList.AddChoice("Nicole (American Female) B-", "af_nicole");
+            voiceList.AddChoice("Bella (American Female) A-", "af_bella");
+            voiceList.AddChoice("Michael (American Male) C+", "am_michael");
+            voiceList.AddChoice("Emma (British Female) B-", "bf_emma");
+            voiceList.AddChoice("George (British Male)", "bm_george");
+            voiceList.AddChoice("Alpha (Japanese Female)", "jf_alpha");
+            voiceList.AddChoice("Kumo (Japanese Male)", "jm_kumo");
+            voiceList.AddChoice("Siwis (French Female)", "ff_siwis");
+            voiceList.AddChoice("Aadya (Hindi Female)", "hf_alpha");
+            voiceList.AddChoice("Omega (Hindi Male)", "hm_omega");
+            voiceList.AddChoice("Dora (Spanish Female)", "ef_dora");
+            voiceList.AddChoice("Alex (Spanish Male)", "em_alex");
+            voiceList.AddChoice("Sara (Italian Female)", "if_sara");
+            voiceList.AddChoice("Nicola (Italian Male)", "im_nicola");
+            voiceList.AddChoice("Doriana (Portuguese Female)", "pf_dora");
+            voiceList.AddChoice("Alexandro (Portuguese Male)", "pm_alex");
+            voiceList.AddChoice("Xiaobei (Mandarin Chinese Female)", "zf_xiaobei");
+            voiceList.AddChoice("Yunjian (Mandarin Chinese Male)", "zm_yunjian");
+
+
+            var languageList = new SlashCommandOptionBuilder()
+                .WithName("language")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithDescription("The language your text is written in");
+            languageList.AddChoice("American English", "a");
+            languageList.AddChoice("British English", "b");
+            languageList.AddChoice("Japanese", "j");
+            languageList.AddChoice("Spanish","e");
+            languageList.AddChoice("French","f");
+            languageList.AddChoice("Italian","i");
+            languageList.AddChoice("Brazilian Portuguese","p");
+            languageList.AddChoice("Mandarin Chinese","z");
+
+            var ttsCommand = new SlashCommandBuilder()
+                .WithName("tts")
+                .WithDescription("Converts the given text to speech")
+                .AddOption("text", ApplicationCommandOptionType.String, "What you want to be spoken", true)
+                .AddOption(voiceList)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("speed")
+                    .WithType(ApplicationCommandOptionType.Number)
+                    .WithDescription("The speed of the speech, 1.0 is the default"))
+                .AddOption(languageList);
+
+
+            var languageISOList = new SlashCommandOptionBuilder()
+                .WithName("language")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithDescription("The input / output language?");
+            languageList.AddChoice("American English", "en-us");
+            languageList.AddChoice("Japanese", "ja");
+            languageList.AddChoice("German", "de");
+            languageList.AddChoice("French", "fr-fr");
+            languageList.AddChoice("Korean", "ko");
+            languageList.AddChoice("Mandarin Chinese", "cmn");
+
+            var presetVoiceList = new SlashCommandOptionBuilder()
+                .WithName("voice_preset")
+                .WithType(ApplicationCommandOptionType.String)
+                .WithDescription("An already uploaded preset voice");
+            if (Directory.Exists(SharedContext.Instance.GetConfig().Zonos.Paths.Presets))
+            {
+                DirectoryInfo di = new DirectoryInfo(SharedContext.Instance.GetConfig().Zonos.Paths.Presets);
+                foreach (FileInfo fi in di.GetFiles("*.mp3"))
+                {
+                    presetVoiceList.AddChoice(Path.GetFileNameWithoutExtension(fi.Name), fi.Name);
+                }
+            }
+
+            var zonosTTSCommand = new SlashCommandBuilder()
+                .WithName("tts_zonos")
+                .WithDescription("Converts the given text to speech")
+                .AddOption("text", ApplicationCommandOptionType.String, "What you want to be spoken", true)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("speed")
+                    .WithType(ApplicationCommandOptionType.Number)
+                    .WithDescription("The speed of the speech, 1.0 is the default")
+                    .WithMinValue(0.0d)
+                    .WithMaxValue(3.0d))
+                .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality sample of the voice to clone")
+                .AddOption(presetVoiceList)
+                .AddOption(languageISOList);
+
+            
+            var addTTSPreset = new SlashCommandBuilder()
+            .WithName("tts_preset")
+            .WithDescription("Uploads a preset for use with tts_zonos")
+            .AddOption("name", ApplicationCommandOptionType.String, "The name of the preset / person", true)
+            .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality sample of the voice to clone", true);
+
             var cameraList = new SlashCommandOptionBuilder()
                 .WithName("target")
                 .WithType(ApplicationCommandOptionType.String)
@@ -1709,7 +2241,11 @@ namespace ComputeServerTempMonitor.Discord
                 {
                     guildCommands[srvId].Add(loadLLMCommand.Build());
                 }
-
+                if (CommandAllowed(srvId, "stream"))
+                {
+                    guildCommands[srvId].Add(voiceCommand.Build());
+                    guildCommands[srvId].Add(streamCommand.Build());
+                }
                 if (CommandAllowed(srvId, "hardware"))
                 {
                     guildCommands[srvId].Add(fansCommand.Build());
@@ -1734,6 +2270,23 @@ namespace ComputeServerTempMonitor.Discord
                 {
                     guildCommands[srvId].Add(llmChatCommands.Build());
                     guildCommands[srvId].Add(llmAskCommands.Build());
+                }
+                if (CommandAllowed(srvId, "claude"))
+                {
+                    guildCommands[srvId].Add(claudeCommands.Build());
+                }
+
+                if (CommandAllowed(srvId, "tts"))
+                {
+                    guildCommands[srvId].Add(ttsCommand.Build());
+                }
+                if (CommandAllowed(srvId, "tts_zonos"))
+                {
+                    guildCommands[srvId].Add(zonosTTSCommand.Build());
+                }
+                if (CommandAllowed(srvId, "tts_preset"))
+                {
+                    guildCommands[srvId].Add(addTTSPreset.Build());
                 }
 
                 if (CommandAllowed(srvId, "status"))

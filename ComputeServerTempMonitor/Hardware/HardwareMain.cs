@@ -15,6 +15,8 @@ using System.Reflection;
 using ComputeServerTempMonitor.NewRelic;
 using ComputeServerTempMonitor.NewRelic.Models;
 using YamlDotNet.Core;
+using Discord;
+using Newtonsoft.Json;
 
 namespace ComputeServerTempMonitor.Hardware
 {
@@ -32,6 +34,9 @@ namespace ComputeServerTempMonitor.Hardware
         static GPUPerformanceState GPUPerfState = GPUPerformanceState.Auto;
 
         static PerformanceCounter cpuCounter;
+
+        static CancellationTokenSource shutdownCanceller = new CancellationTokenSource();
+        static Task Shutdown;
 
         static bool CPUStarted = false;
         static bool GPUStarted = false;
@@ -122,44 +127,53 @@ namespace ComputeServerTempMonitor.Hardware
                 if (SharedContext.Instance.GetConfig().SMIPath == "")
                 {
                     SharedContext.Instance.Log(LogLevel.ERR, "HardwareMain", "SMIPath not set.");
+                    return;
+                }
+                if (!System.IO.File.Exists(SharedContext.Instance.GetConfig().SMIPath))
+                {
+                    SharedContext.Instance.Log(LogLevel.ERR, "HardwareMain", "SMIPath not found.");
+                    return;
                 }
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     try
                     {
-                        // get other details from smi
-                        List<string> smiOut = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().SMIPath, $"dmon -s pcm -c 1");
-                        /*
-C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
-# gpu   pwr gtemp mtemp  mclk  pclk    fb  bar1
-# Idx     W     C     C   MHz   MHz    MB    MB
-    0     14     34      -    405    645  41205      5
-    1      9     37      -    405    645  40110      7
-                        */
-                        foreach (string line in smiOut)
+                        if (GPUStarted)
                         {
-                            string l = line.Trim();
-                            if (l == "" || l.StartsWith("#"))
-                                continue;
-                            string[] gpuD = l.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                            // which is the temp?
-                            if (gpuD.Length >= 8)
+                            // get other details from smi
+                            List<string> smiOut = SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().SMIPath, $"dmon -s pcm -c 1");
+                            /*
+    C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
+    # gpu   pwr gtemp mtemp  mclk  pclk    fb  bar1
+    # Idx     W     C     C   MHz   MHz    MB    MB
+        0     14     34      -    405    645  41205      5
+        1      9     37      -    405    645  40110      7
+                            */
+                            foreach (string line in smiOut)
                             {
-                                //Console.WriteLine(string.Join(",", gpuD));
-                                uint i = uint.Parse(gpuD[0]);
-                                // gpuD[1] is power in Watts
-                                // gpuD[4] is mem clock
-                                // gpuD[5] is gpu clock
-                                // gpuD[6] is used vram in MB
-                                gpuPerf[i].PowerConsumption = uint.Parse(gpuD[1]);
-                                gpuPerf[i].MemoryClock = uint.Parse(gpuD[4]);
-                                gpuPerf[i].ProcessorClock = uint.Parse(gpuD[5]);
-                                gpuPerf[i].UsedVRAM = uint.Parse(gpuD[6]);
-                                string logName = $"gpu.{gpuPerf[i].Name.Replace(" ", "").Replace("_", "")}.{i}.".ToLower();
-                                NewRelicMain.Log(new Metric() { name = logName + "power", value = gpuPerf[i].PowerConsumption });
-                                NewRelicMain.Log(new Metric() { name = logName + "mclk", value = gpuPerf[i].MemoryClock });
-                                NewRelicMain.Log(new Metric() { name = logName + "pclk", value = gpuPerf[i].ProcessorClock });
-                                NewRelicMain.Log(new Metric() { name = logName + "usedvram", value = gpuPerf[i].UsedVRAM });
+                                string l = line.Trim();
+                                if (l == "" || l.StartsWith("#"))
+                                    continue;
+                                string[] gpuD = l.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                                // which is the temp?
+                                if (gpuD.Length >= 8)
+                                {
+                                    //Console.WriteLine(string.Join(",", gpuD));
+                                    uint i = uint.Parse(gpuD[0]);
+                                    // gpuD[1] is power in Watts
+                                    // gpuD[4] is mem clock
+                                    // gpuD[5] is gpu clock
+                                    // gpuD[6] is used vram in MB
+                                    gpuPerf[i].PowerConsumption = uint.Parse(gpuD[1]);
+                                    gpuPerf[i].MemoryClock = uint.Parse(gpuD[4]);
+                                    gpuPerf[i].ProcessorClock = uint.Parse(gpuD[5]);
+                                    gpuPerf[i].UsedVRAM = uint.Parse(gpuD[6]);
+                                    string logName = $"gpu.{gpuPerf[i].Name.Replace(" ", "").Replace("_", "")}.{i}.".ToLower();
+                                    NewRelicMain.Log(new Metric() { name = logName + "power", value = gpuPerf[i].PowerConsumption });
+                                    NewRelicMain.Log(new Metric() { name = logName + "mclk", value = gpuPerf[i].MemoryClock });
+                                    NewRelicMain.Log(new Metric() { name = logName + "pclk", value = gpuPerf[i].ProcessorClock });
+                                    NewRelicMain.Log(new Metric() { name = logName + "usedvram", value = gpuPerf[i].UsedVRAM });
+                                }
                             }
                         }
                         Thread.Sleep(SharedContext.Instance.GetConfig().GPUCheckingInterval * 1000);
@@ -280,13 +294,82 @@ C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
                         serverStats.MemoryUtilisation = (memInfo.MemoryLoadBytes * 100.0f) / memInfo.TotalAvailableMemoryBytes; // percent
                         NewRelicMain.Log(new Metric() { name = $"memory.utilisation", value = serverStats.MemoryUtilisation });
                         NewRelicMain.Log(new Metric() { name = $"memory.usedbytes", value = memInfo.MemoryLoadBytes * 100.0f });
+                        try
+                        {
+                            BatteryInformation bi = BatteryInfo.GetBatteryInformation();
+                            if (bi != null)
+                            {
+                                // if we've gone offline since the last check, Send a message
+                                if (serverStats.PowerOnline && ((int)bi.PowerState & 0x00000001) == 0)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.WARN, "Hardware", $"Power has been lost. Starting shutdown timer for {SharedContext.Instance.GetConfig().PowerLossShutdownTimer} sec");
+                                    serverStats.PowerOnline = false;
+                                    Shutdown = new Task(async () =>
+                                    {
+                                        try
+                                        {
+                                            await Task.Delay(SharedContext.Instance.GetConfig().PowerLossShutdownTimer * 1000);
+                                            BatteryInformation bi = BatteryInfo.GetBatteryInformation();
+                                            if (bi != null)
+                                            {
+                                                // if we've gone offline since the last check, Send a message
+                                                if (((int)bi.PowerState & 0x00000001) == 0)
+                                                {
+                                                    SharedContext.Instance.Log(LogLevel.ERR, "Power", "Shutting down! Shut down after power loss timer has elapsed and power is still off.");
+                                                    // shut down
+                                                    NewRelicMain.Flush();
+                                                    // do we want to terminate any software that is running first?
+                                                    ProcessStartInfo psi = new ProcessStartInfo("shutdown", "/s /t 0 /f");
+                                                    psi.CreateNoWindow = true;
+                                                    psi.UseShellExecute = false;
+                                                    Process.Start(psi);
+                                                    return;
+                                                }
+                                                SharedContext.Instance.Log(LogLevel.WARN, "Power", "Power restored. Shutdown aborted.");
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+
+                                        }
+                                    }, shutdownCanceller.Token);
+                                    Shutdown.Start();
+                                }
+                                else if (!serverStats.PowerOnline && ((int)bi.PowerState & 0x00000001) > 0)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.WARN, "Hardware", $"Power restored.");
+                                    serverStats.PowerOnline = true;
+                                    shutdownCanceller.Cancel();
+                                    shutdownCanceller.Dispose();
+                                    shutdownCanceller = new CancellationTokenSource(); // get ready to do it all again
+                                }
+                                //SharedContext.Instance.Log(LogLevel.INFO, "Hardware", JsonConvert.SerializeObject(bi));
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.rate", value = bi.Rate });
+                                NewRelicMain.Log(new Metric() { name = $"ups.powerstate", value = (int)bi.PowerState });
+                                NewRelicMain.Log(new Metric() { name = $"ups.online", value = (int)bi.PowerState & 0x00000001 });
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.currentcapacity", value = bi.CurrentCapacity });
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.designedcapacity", value = bi.DesignedCapacity });
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.cyclecount", value = bi.CycleCount });
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.fullchargecapacity", value = bi.FullChargeCapacity });
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.capacity", value = bi.CurrentCapacity / bi.FullChargeCapacity });
+                                NewRelicMain.Log(new Metric() { name = $"ups.battery.voltage", value = bi.Voltage / 1000.0 });
+                            }
+                            else
+                            {
+                                //SharedContext.Instance.Log(LogLevel.INFO, "Hardware", "Battery info not available");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            SharedContext.Instance.Log(LogLevel.INFO, "Hardware", "Battery info crashed: " + ex.ToString());
+                        }
                         // poll
                         CPUStarted = true;
                         Thread.Sleep(SharedContext.Instance.GetConfig().CPUCheckingInterval * 1000);
                     }
                     catch (Exception ex)
                     {
-                        SharedContext.Instance.Log(LogLevel.ERR, "Main", "Error reading IPMI data: " + ex.Message);
+                        SharedContext.Instance.Log(LogLevel.ERR, "Main", "Error reading IPMI data: " + ex.ToString());
                     }
                 }
             }, cancellationToken);
@@ -298,7 +381,21 @@ C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
                 {
                     try
                     {
-                        if (GPUPerfState == GPUPerformanceState.Auto)
+                        if (!serverStats.PowerOnline)
+                        {
+                            foreach (uint id in gpuPerf.Keys)
+                            {
+                                if (gpuPerf[id].State != GPUPerformanceState.Low)
+                                {
+                                    if (GPUSleep(id))
+                                    {
+                                        gpuPerf[id].State = GPUPerformanceState.Low;
+                                        SharedContext.Instance.Log(LogLevel.WARN, "Power", $"GPU {id} forced into an idle state while power offline.");
+                                    }
+                                }
+                            }
+                        }
+                        else if (GPUPerfState == GPUPerformanceState.Auto)
                         {
                             foreach (uint id in gpuPerf.Keys)
                             {
@@ -329,7 +426,7 @@ C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
                                             if (GPUSleep(id))
                                             {
                                                 gpuPerf[id].State = GPUPerformanceState.Low;
-                                                SharedContext.Instance.Log(LogLevel.INFO, "PerformanceTask", $"GPU {id} entered a idle state");
+                                                SharedContext.Instance.Log(LogLevel.INFO, "PerformanceTask", $"GPU {id} entered an idle state");
                                             }
                                         }
                                     }
@@ -406,6 +503,7 @@ C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
                             SharedContext.Instance.Log(LogLevel.INFO, "FanTask", $"Fan speed is now {newSpeed}% until {new DateTime(serverStats.ChassisFanSpinDownAt).ToString()}");
                             //printState(true);
                         }
+                        NewRelicMain.Log(new Metric() { name = $"chassis.fans.percent", value = serverStats.ChassisFanSpeedPct });
                         fanDetails["Until"] = new DateTime(serverStats.ChassisFanSpinDownAt).ToString();
                         FanStarted = true;
                         Thread.Sleep(3000);
@@ -421,39 +519,39 @@ C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
 
         // instead of periodically reading the state, we should raise a metric / log / event when something happens
         // let the newrelic module sort out the batching and sending of that
-        public static Dictionary<string, object>? GetMonitoring()
-        {
-            if (CPUStarted && GPUStarted && PerfStarted && FanStarted)
-            {
-                Dictionary<string, object> stats = new Dictionary<string, object>();
-                foreach (KeyValuePair<uint, CPUStats> cpu in serverStats.cpuStats)
-                {
-                    stats[cpu.Value.Name.Replace("_", "") + "Temp"] = cpu.Value.LastTemp;
-                    stats[cpu.Value.Name.Replace("_", "") + "Util"] = serverStats.CpuUtilisation;
-                }
-                stats["InletTemp"] = serverStats.InletTemp;
-                stats["ExhaustTemp"] = serverStats.ExhaustTemp;
-                stats["MemoryUtil"] = serverStats.MemoryUtilisation;
-                stats["PowerConsumption"] = serverStats.PowerConsumption;
-                int i = 0;
-                foreach (KeyValuePair<uint, GPUStats> gpu in gpuPerf)
-                {
-                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}Temp"] = gpu.Value.LastTemp;
-                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}FanSpeed"] = gpu.Value.FanSpeed;
-                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}Util"] = gpu.Value.LastUtilisation;
-                    stats[$"{gpu.Value.Name.Replace(" ", "")}{i}PowerState"] = (GPUPerfState == GPUPerformanceState.Auto ? Enum.GetName(gpu.Value.State) : Enum.GetName(GPUPerfState));
-                    i++;
-                }
-                stats["ChassisFansSpeed"] = serverStats.ChassisFanSpeedPct;
-                foreach (KeyValuePair<string, uint> fan in serverStats.ChassisFansRPM)
-                {
-                    stats[fan.Key + "RPM"] = fan.Value;
-                }
-                stats["ChassisFanSpeedTTL"] = serverStats.ChassisFanSpinDownAt / TimeSpan.TicksPerMillisecond;
-                return stats;
-            }
-            return null;
-        }
+        //public static Dictionary<string, object>? GetMonitoring()
+        //{
+        //    if (CPUStarted && GPUStarted && PerfStarted && FanStarted)
+        //    {
+        //        Dictionary<string, object> stats = new Dictionary<string, object>();
+        //        foreach (KeyValuePair<uint, CPUStats> cpu in serverStats.cpuStats)
+        //        {
+        //            stats[cpu.Value.Name.Replace("_", "") + "Temp"] = cpu.Value.LastTemp;
+        //            stats[cpu.Value.Name.Replace("_", "") + "Util"] = serverStats.CpuUtilisation;
+        //        }
+        //        stats["InletTemp"] = serverStats.InletTemp;
+        //        stats["ExhaustTemp"] = serverStats.ExhaustTemp;
+        //        stats["MemoryUtil"] = serverStats.MemoryUtilisation;
+        //        stats["PowerConsumption"] = serverStats.PowerConsumption;
+        //        int i = 0;
+        //        foreach (KeyValuePair<uint, GPUStats> gpu in gpuPerf)
+        //        {
+        //            stats[$"{gpu.Value.Name.Replace(" ", "")}{i}Temp"] = gpu.Value.LastTemp;
+        //            stats[$"{gpu.Value.Name.Replace(" ", "")}{i}FanSpeed"] = gpu.Value.FanSpeed;
+        //            stats[$"{gpu.Value.Name.Replace(" ", "")}{i}Util"] = gpu.Value.LastUtilisation;
+        //            stats[$"{gpu.Value.Name.Replace(" ", "")}{i}PowerState"] = (GPUPerfState == GPUPerformanceState.Auto ? Enum.GetName(gpu.Value.State) : Enum.GetName(GPUPerfState));
+        //            i++;
+        //        }
+        //        stats["ChassisFansSpeed"] = serverStats.ChassisFanSpeedPct;
+        //        foreach (KeyValuePair<string, uint> fan in serverStats.ChassisFansRPM)
+        //        {
+        //            stats[fan.Key + "RPM"] = fan.Value;
+        //        }
+        //        stats["ChassisFanSpeedTTL"] = serverStats.ChassisFanSpinDownAt / TimeSpan.TicksPerMillisecond;
+        //        return stats;
+        //    }
+        //    return null;
+        //}
 
         public static string GetCLIStatus(bool showHeaders)
         {
@@ -707,10 +805,13 @@ C:\Users\Administrator>nvidia-smi dmon -s pcm -c 1
             }
             if (!System.Diagnostics.Debugger.IsAttached)
             {
-                SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x01 0x01");
-                SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00");
+                // On the way out, set the fans to high speed to cool the GPUs as it boots again
+                SetChassisFanSpeed(100);
+                SharedContext.Instance.Log(LogLevel.INFO, "HardwareMain", "Set chassis fan speed to 100%.");
+                //SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0x30 0x01 0x01");
+                //SharedContext.ExecuteCLI(SharedContext.Instance.GetConfig().IPMIPath, $"-I {SharedContext.Instance.GetConfig().IPMIInterface}{SharedContext.Instance.GetConfig().IPMILogin} raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00");
             }
-            SharedContext.Instance.Log(LogLevel.INFO, "HardwareMain", "Disabled manual control and restored PCIe cooling response.");
+            //SharedContext.Instance.Log(LogLevel.INFO, "HardwareMain", "Disabled manual control and restored PCIe cooling response.");
         }
     }
 }

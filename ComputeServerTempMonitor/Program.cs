@@ -10,6 +10,8 @@ using Newtonsoft.Json;
 using ComputeServerTempMonitor.IoT;
 using System.Threading;
 using ComputeServerTempMonitor.NewRelic;
+using ComputeServerTempMonitor.NewRelic.Models;
+using ComputeServerTempMonitor.Anthropic;
 
 namespace ComputeServerTempMonitor;
 
@@ -53,6 +55,7 @@ class Program
         IsRunning = false;
         cancellationTokenSource.Cancel();
         OobaboogaMain.Exit();
+        ClaudeMain.Exit();
         ComfyMain.Exit();
         DiscordMain.Exit();
         HardwareMain.Exit();
@@ -80,36 +83,12 @@ class Program
             IoTMain.Init(cancellationTokenSource.Token);
             OobaboogaMain.Init(cancellationTokenSource.Token);
             ComfyMain.Init(cancellationTokenSource.Token);
+            ClaudeMain.Init(cancellationTokenSource.Token);
         }
         catch (Exception ex)
         {
             SharedContext.Instance.Log(LogLevel.ERR, "Main", ex.ToString());
         }
-
-        // data logging control thread
-        Task tLog = new Task(async () =>
-        {
-            Thread.Sleep(15000); // wait for boot
-            while (!cancellationTokenSource.Token.IsCancellationRequested)
-            {
-                try
-                {
-                    Dictionary<string, object>? stats;
-                    stats = HardwareMain.GetMonitoring();
-                    if (stats != null)
-                        SharedContext.Instance.LogMetrics("BotHardware", stats);
-                    //stats = SoftwareMain.GetMonitoring();
-                    //if (stats != null)
-                    //    SharedContext.Instance.LogMetrics("BotSoftware", stats);
-                }
-                catch (Exception ex)
-                {
-                    SharedContext.Instance.Log(LogLevel.WARN, "NewRelic", "Unable to send stats to New Relic: " + ex.ToString());
-                }
-                Thread.Sleep(15000);
-            }
-        }, cancellationTokenSource.Token);
-        tLog.Start();
 
         // put in our external control loop here
         // it'll be a state-machine with the current mode

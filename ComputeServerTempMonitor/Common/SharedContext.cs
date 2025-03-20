@@ -1,4 +1,5 @@
-﻿using ComputeServerTempMonitor.NewRelic;
+﻿using ComputeServerTempMonitor.Discord;
+using ComputeServerTempMonitor.NewRelic;
 using ComputeServerTempMonitor.NewRelic.Models;
 using Newtonsoft.Json;
 using System;
@@ -71,16 +72,19 @@ namespace ComputeServerTempMonitor.Common
             Console.WriteLine($"{DateTime.Now.ToString("s")}\t{Enum.GetName(lvl).PadRight(4, ' ')}\t{source}: {message}");
             if (_config.NewRelic.ForwardLogs)
                 NewRelicMain.Log(new LogMessage() { message = message, level = Enum.GetName(lvl) });
-        }
-
-        public void LogMetrics(string eventType, Dictionary<string, object> metrics)
-        {
-            metrics["eventType"] = eventType;
-            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Post, _config.NewRelic.URLs.Events);
-            req.Headers.Add("Api-Key", _config.NewRelic.LicenseKey);
-            req.Content = new StringContent(JsonConvert.SerializeObject(metrics), System.Text.Encoding.UTF8, "application/json");
-            HttpResponseMessage hrm = webClient.SendAsync(req).Result;
-            //Console.WriteLine(hrm.StatusCode + "\n" + hrm.Content.ReadAsStringAsync().Result);
+            // put in a thing that sends errors and warnings to one of my discord channels as well?
+            // config for min lvl and a channel in the OwnerServer to send it to?
+            if (_config.DiscordLoggingChannel > 0 && lvl >= _config.DiscordMinLogLevel)
+            {
+                try
+                {
+                    DiscordMain.SendMessage(_config.DiscordLoggingChannel, $"{Enum.GetName(lvl).PadRight(4, ' ')} - {source} - {(message.Length < 1950 ? message : message.Substring(0,1950))}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Unable to send message to discord logging channel: {ex.ToString()}");
+                } // log failing to log? lets not.
+            }
         }
 
         public static List<string> ExecuteCLI(string command, string args)

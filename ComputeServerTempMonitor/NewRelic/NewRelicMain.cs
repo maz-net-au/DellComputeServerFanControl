@@ -89,50 +89,57 @@ namespace ComputeServerTempMonitor.NewRelic
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    try
-                    {
-                        if (Metrics.Count > 0)
-                        {
-                            // convert and serialise the metrics array
-                            string data = JsonConvert.SerializeObject(Metrics);
-                            data = $"[{{\"metrics\":{data}}}]";
-                            //Console.WriteLine(data);
-                            Metrics.Clear();
-                            if (!PushData(SharedContext.Instance.GetConfig().NewRelic.URLs.Metrics, data))
-                            {
-
-                            }
-                        }
-                        if (Events.Count > 0)
-                        {
-                            // convert and serialise the events array
-                            string data = JsonConvert.SerializeObject(Events);
-                            Events.Clear();
-                            if (!PushData(SharedContext.Instance.GetConfig().NewRelic.URLs.Events, data))
-                            {
-                                
-                            }
-                        }
-                        if (LogMessages.Count > 0)
-                        {
-                            // convert and serialise the logs array
-                            string data = JsonConvert.SerializeObject(LogMessages);
-                            data = $"[{{\"logs\":{data}}}]";
-                            LogMessages.Clear();
-                            if (!PushData(SharedContext.Instance.GetConfig().NewRelic.URLs.Logs, data))
-                            {
-                                // should we put the data back?
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        
-                    }
+                    Flush();
                     Thread.Sleep(SharedContext.Instance.GetConfig().NewRelic.PushInterval * 1000);
                 }
             }, ct);
             tLog.Start();
+        }
+        // so I can call this when I know we're going to go away soon
+        public static void Flush()
+        {
+            try
+            {
+                if (Metrics.Count > 0)
+                {
+                    // convert and serialise the metrics array
+                    string olddata = JsonConvert.SerializeObject(Metrics);
+                    string data = $"[{{\"metrics\":{olddata}}}]";
+                    //Console.WriteLine(data);
+                    Metrics.Clear();
+                    if (!PushData(SharedContext.Instance.GetConfig().NewRelic.URLs.Metrics, data))
+                    {
+
+                        Metrics = JsonConvert.DeserializeObject<List<Metric>>(olddata).Concat(Metrics).ToList();
+                    }
+                }
+                if (Events.Count > 0)
+                {
+                    // convert and serialise the events array
+                    string data = JsonConvert.SerializeObject(Events);
+                    Events.Clear();
+                    if (!PushData(SharedContext.Instance.GetConfig().NewRelic.URLs.Events, data))
+                    {
+                        Events = JsonConvert.DeserializeObject<List<Event>>(data).Concat(Events).ToList();
+                    }
+                }
+                if (LogMessages.Count > 0)
+                {
+                    // convert and serialise the logs array
+                    string data = JsonConvert.SerializeObject(LogMessages);
+                    data = $"[{{\"logs\":{data}}}]";
+                    LogMessages.Clear();
+                    if (!PushData(SharedContext.Instance.GetConfig().NewRelic.URLs.Logs, data))
+                    {
+                        // should we put the data back?
+                        LogMessages = JsonConvert.DeserializeObject<List<LogMessage>>(data).Concat(LogMessages).ToList();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+
+            }
         }
         private static bool PushData(string url, string serialisedData)
         {
@@ -154,7 +161,7 @@ namespace ComputeServerTempMonitor.NewRelic
             }
             catch (Exception ex)
             {
-                SharedContext.Instance.Log(LogLevel.ERR, "NewRelic", $"Unable to send data to New Relic ({url}):\n" + ex.ToString());
+                SharedContext.Instance.Log(LogLevel.INFO, "NewRelic", $"Unable to send data to New Relic ({url}):\n" + ex.Message);
                 return false;
             }
         }

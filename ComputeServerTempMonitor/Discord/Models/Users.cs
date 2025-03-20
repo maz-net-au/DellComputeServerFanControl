@@ -1,4 +1,5 @@
-﻿using System;
+﻿using ComputeServerTempMonitor.Common;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -17,7 +18,6 @@ namespace ComputeServerTempMonitor.Discord.Models
     }
     public class DiscordMeta
     {
-        public ulong OwnerServer { get; set; } = 0;
         public List<ulong> Owners { get; set; } = new List<ulong>();
         public List<ulong> GlobalAdmins { get; set; } = new List<ulong>();
         public List<ulong> GlobalUsers { get; set; } = new List<ulong>(); // temporary while I move them all to servers

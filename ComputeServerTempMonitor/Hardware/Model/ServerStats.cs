@@ -18,5 +18,6 @@ namespace ComputeServerTempMonitor.Hardware.Model
         public int InletTemp { get; set; } // sdr type Temperature
         public int ExhaustTemp { get; set; } // sdr type Temperature
         public uint PowerConsumption { get; set; } // sdr type Current
+        public bool PowerOnline { get; set; } = true;
     }
 }

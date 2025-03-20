@@ -39,5 +39,10 @@ namespace ComputeServerTempMonitor.IoT
             }
             return "";            
         }
+
+        // how do we interact with other things. what have we got? ac, lights, ir, leds, cat door and feeder, fans
+        // my hub needs to know what features are used on each device. is that a many -> many?
+        // then i want to list devices by group
+        // then i want to be able to interact with parts. this might be relatively hard-coded
     }
 }
