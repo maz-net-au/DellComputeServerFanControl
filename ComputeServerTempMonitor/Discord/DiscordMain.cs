@@ -1051,13 +1051,25 @@ namespace ComputeServerTempMonitor.Discord
                                 }
                                 else
                                 {
-                                    await command.ModifyOriginalResponseAsync((s) =>
+                                    try
                                     {
-                                        s.Content = $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
-                                        s.Attachments = response.Attachments;
-                                        s.Components = response.Components.Build();
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                        await command.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
+                                            s.Attachments = response.Attachments;
+                                            s.Components = response.Components.Build();
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        SharedContext.Instance.Log(LogLevel.ERR, "DiscordMain", $"Unable to send generated image '{(response.Statistics.ContainsKey(ImageGenStatisticType.FileName) ? response.Statistics[ImageGenStatisticType.FileName] : "no file")}' for request '{(response.Statistics.ContainsKey(ImageGenStatisticType.Id) ? response.Statistics[ImageGenStatisticType.Id] : "???")}': {ex.Message}");
+                                        await command.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"There was an error generating your image. Please try again later. {ex.Message}";
+                                        });
+                                    }
+
                                 }
                             }
                             catch (Exception ex)
