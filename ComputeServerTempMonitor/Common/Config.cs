@@ -41,6 +41,17 @@ namespace ComputeServerTempMonitor.Common
         public KokoroConfig Kokoro { get; set; }
         public ZonosConfig Zonos { get; set; }
         public AnthropicConfig Anthropic { get; set; }
+        public ChatterboxConfig Chatterbox { get; set; }
+    }
+    public class ChatterboxConfig
+    {
+        public string URL { get; set; }
+        public ChatterboxPathsConfig Paths { get; set; } = new ChatterboxPathsConfig();
+    }
+    public class ChatterboxPathsConfig
+    {
+        public string Voices { get; set; }
+        public string Output { get; set; }
     }
     public class FanTempSpeeds
     {

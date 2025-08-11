@@ -6,14 +6,9 @@ using System.Threading.Tasks;
 
 namespace ComputeServerTempMonitor.ComfyUI.Models
 {
-    [Flags]
-    public enum FlowModelTypes
+    public class QueuedRequest
     {
-        unknown = 0x00,
-        sdxl = 0x01,
-        sd3 = 0x02,
-        flux = 0x04,
-        sd35 = 0x08,
-        qwen = 0x16
+        public ulong RequestId { get; set; }
+        public string PromptId { get; set; }
     }
 }

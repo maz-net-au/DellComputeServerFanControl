@@ -19,6 +19,9 @@ using ComputeServerTempMonitor.Zonos;
 using Discord.Audio;
 using ComputeServerTempMonitor.Anthropic;
 using Discord.Rest;
+using ComputeServerTempMonitor.Chatterbox;
+using System.Text.RegularExpressions;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace ComputeServerTempMonitor.Discord
 {
@@ -79,6 +82,73 @@ namespace ComputeServerTempMonitor.Discord
                                 await arg.RespondAsync("Content Updated", null, false, true);
                                 await arg.DeleteOriginalResponseAsync();// this might only work if not ephemeral
                             }
+                        }
+                        return;
+                    case "imagerefine":
+                        {
+                            Task.Run(async () =>
+                            {
+                                if (arg.ChannelId == null)
+                                    await arg.RespondAsync("Request failed");
+                                IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
+                                if (chan == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Channel not found");
+                                    await arg.RespondAsync("Request failed");
+                                }
+                                string prompt = arg.Data.Components.ToList().FirstOrDefault(x => x.CustomId == "prompt")?.Value;
+                                if(prompt == null || prompt == "")
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Refine prompt is required");
+                                    await arg.RespondAsync("Refine prompt is required");
+                                }
+                                string widstr = arg.Data.Components.ToList().FirstOrDefault(x => x.CustomId == "width")?.Value;
+                                int width = 0;
+                                if (widstr == null || widstr == "" || !int.TryParse(widstr, out width))
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Refine: Invalid width specified");
+                                    await arg.RespondAsync("Invalid width specified");
+                                }
+                                string hstr = arg.Data.Components.ToList().FirstOrDefault(x => x.CustomId == "height")?.Value;
+                                int height = 0;
+                                if (hstr == null || hstr == "" || !int.TryParse(hstr, out height))
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Refine: Invalid height specified");
+                                    await arg.RespondAsync("Invalid height specified");
+                                }
+                                await arg.RespondAsync($"Refine request accepted.\n{GetDrawStatus()}");
+                                HistoryResponse? hr = await ComfyMain.Refine(args[0], prompt, width, height, arg.Id);
+                                if (hr == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
+                                    await chan.SendMessageAsync("Request failed");
+                                }
+                                else
+                                {
+                                    DiscordImageResponse res = CreateImageGenResponse(hr, arg.GuildId);
+                                    uint filesize = 0;
+                                    uint.TryParse(res.Statistics[ImageGenStatisticType.FileSize], out filesize);
+                                    if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
+                                    {
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"{arg.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]}";
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    else
+                                    {
+                                        await arg.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Here is your refined image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
+                                            s.Attachments = res.Attachments;
+                                            s.Components = res.Components.Build();
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
+                                    }
+                                    //await chan.SendFilesAsync(res.Attachments, $"Is this version better {arg.User.Mention}?", false, null, RequestOptions.Default, AllowedMentions.All, null, res.Components.Build());
+                                }
+                            });
                         }
                         return;
                 }
@@ -234,7 +304,7 @@ namespace ComputeServerTempMonitor.Discord
                                 if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out upscale_by))
                                     return;
                                 await arg.RespondAsync($"{upscale_by}x upscale request accepted for {arg.User.Mention}.\n{GetDrawStatus()}");
-                                HistoryResponse? hr = await ComfyMain.Upscale(parts[1], 0, upscale_by, arg.User.Username);
+                                HistoryResponse? hr = await ComfyMain.Upscale(parts[1], 0, upscale_by, arg.Id);
                                 if (hr == null)
                                 {
                                     SharedContext.Instance.Log(LogLevel.ERR, "Upscale", "Result is null");
@@ -290,7 +360,7 @@ namespace ComputeServerTempMonitor.Discord
                                 if (!float.TryParse(arg.Data.Values.FirstOrDefault(), out vary_by))
                                     return;
                                 await arg.RespondAsync($"{Math.Round(vary_by * 100)}% variation request accepted for {arg.User.Mention}.\n{GetDrawStatus()}");
-                                HistoryResponse? hr = await ComfyMain.Variation(parts[1], 0, vary_by, arg.User.Username);
+                                HistoryResponse? hr = await ComfyMain.Variation(parts[1], 0, vary_by, arg.Id);
                                 if (hr == null)
                                 {
                                     SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
@@ -534,6 +604,54 @@ namespace ComputeServerTempMonitor.Discord
 
                         }
                         return;
+                    case "cancelimg":
+                        {
+                            Task.Run(async () =>
+                            {
+                                if (arg.User.Id.ToString() != args[1])
+                                {
+                                    await arg.RespondAsync("You are not allowed to cancel someone else's request.");
+                                    return;
+                                }
+                                if (arg.ChannelId == null)
+                                {
+                                    await arg.RespondAsync("Request failed");
+                                    return;
+                                }
+                                IMessageChannel? chan = _client.GetChannel(arg.ChannelId ?? 0) as IMessageChannel;
+                                if (chan == null)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Channel not found");
+                                    await arg.RespondAsync("Request failed");
+                                    return;
+                                }
+                                bool hr = await ComfyMain.Cancel(ulong.Parse(args[0]), arg.Id);
+                                if (hr == false)
+                                {
+                                    SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
+                                    await chan.SendMessageAsync("Request failed");
+                                    return;
+                                }
+                                await arg.RespondAsync($"Generation cancelled.");
+                            });
+                        }
+                        return;
+                    case "showrefine":
+                        {
+                            Task.Run(async () =>
+                            {
+                                // show a modal with a prompt box that is applied to the output of this request
+                                // default to what the image was sent in as?
+                                ModalBuilder mb = new ModalBuilder()
+                                    .WithTitle("Refine image")
+                                    .WithCustomId($"imagerefine:{args[0]}") // i need to get the url to the current image. or the ID
+                                    .AddTextInput("Prompt", "prompt", TextInputStyle.Paragraph, "What do you want to change?", 1, 1200, true)
+                                    .AddTextInput("Width", "width", TextInputStyle.Short, "", 1, 4, true, (args.Length > 1 ? args[1] : "1024"))
+                                    .AddTextInput("Height", "height", TextInputStyle.Short, "", 1, 4, true, (args.Length > 2 ? args[2] : "1024"));
+                                await arg.RespondWithModalAsync(mb.Build());
+                            }, cancellationToken);
+                        }
+                        return;
                     case "regenerate":
                         {
                             Task.Run(async () =>
@@ -547,7 +665,7 @@ namespace ComputeServerTempMonitor.Discord
                                     await arg.RespondAsync("Request failed");
                                 }
                                 await arg.RespondAsync($"Regenerate request accepted.\n{GetDrawStatus()}");
-                                HistoryResponse? hr = await ComfyMain.Regenerate(args[0], arg.User.Username);
+                                HistoryResponse? hr = await ComfyMain.Regenerate(args[0], arg.Id);
                                 if (hr == null)
                                 {
                                     SharedContext.Instance.Log(LogLevel.ERR, "Button", "Result is null");
@@ -594,7 +712,7 @@ namespace ComputeServerTempMonitor.Discord
 
         public static string GetDrawStatus()
         {
-            return $"Queue length: {ComfyMain.CurrentQueueLength + 1}\nCurrent temp: {HardwareMain.GetCurrentMaxGPUTemp()}\nFan speed: {HardwareMain.GetChassisFanSpeed()}";
+            return $"Current temp: {HardwareMain.GetCurrentMaxGPUTemp()}, Fan speed: {HardwareMain.GetChassisFanSpeed()}";
         }
         // seems obnoxious, but we'll try get some re-use going
         public static DiscordImageResponse CreateImageGenResponse(HistoryResponse hr, ulong? server)
@@ -617,6 +735,8 @@ namespace ComputeServerTempMonitor.Discord
                 uint maxDim = 0;
                 foreach (var img in images)
                 {
+                    uint width = 0;
+                    uint height = 0;
                     string imgPath = SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + img.subfolder + "/" + img.filename;
                     // get the stats
                     if (File.Exists(imgPath))
@@ -629,6 +749,8 @@ namespace ComputeServerTempMonitor.Discord
                         dir.Statistics.Add(ImageGenStatisticType.Height, image.Height.ToString());
                         dir.Statistics.Add(ImageGenStatisticType.Width, image.Width.ToString());
                         maxDim = Math.Max(image.Height, image.Width);
+                        width = image.Width;
+                        height = image.Height;
                     }
                     files.Add(new FileAttachment(imgPath, img.filename, null, (bool)discordInfo.GetPreference(server, PreferenceNames.SpoilerImages) != false, false));
                     if (maxDim <= SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumControlsDimension && (bool)(discordInfo.GetPreference(server, PreferenceNames.ShowUpscaleButton) ?? true) != false)
@@ -671,9 +793,11 @@ namespace ComputeServerTempMonitor.Discord
                     {
                         ActionRowBuilder arb = new ActionRowBuilder();
                         ButtonBuilder bbredo = new ButtonBuilder($"Reroll", $"regenerate:{hr.prompt[1].ToString()}", ButtonStyle.Success, null, new Emoji("🎲"), false, null);
+                        ButtonBuilder bbrefine = new ButtonBuilder($"Refine", $"showrefine:{hr.prompt[1].ToString()},{width},{height}", ButtonStyle.Secondary, null, new Emoji("✏"), false, null);
                         // ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
                         //ButtonBuilder mtest = new ButtonBuilder($"Modal Test", $"modal:{hr.prompt[1].ToString()}", ButtonStyle.Success, null, new Emoji("🤔"), false, null);
                         arb.AddComponent(bbredo.Build());
+                        arb.AddComponent(bbrefine.Build());
                         //arb.AddComponent(mtest.Build());
                         cb.AddRow(arb);
                     }
@@ -996,8 +1120,10 @@ namespace ComputeServerTempMonitor.Discord
                 {
                     Task.Run(async () =>
                     {
-                        string randomId = Guid.NewGuid().ToString("D");
                         await command.DeferAsync(false, RequestOptions.Default);
+                        DateTime received = DateTime.Now;
+                        bool timerUp = false;
+                        string randomId = Guid.NewGuid().ToString("D");
                         // get flow name
                         List<ComfyUIField> fields = new List<ComfyUIField>();
                         var flowName = comfyFlow;
@@ -1028,11 +1154,61 @@ namespace ComputeServerTempMonitor.Discord
                             }
                         }
                         await command.ModifyOriginalResponseAsync((s) => { s.Content = $"Request received.\n{GetDrawStatus()}"; });
-                        HistoryResponse? res = await ComfyMain.EnqueueRequest(command.User.GlobalName, flowName, fields);
+                        Task.Run(async () =>
+                        {
+                            while (!timerUp && (DateTime.Now - received).TotalSeconds < 890)
+                            {
+                                await Task.Delay(5000);
+                                int pos = ComfyMain.GetCurrentQueuePosition(command.Id);
+                                if (pos == 0)
+                                {
+                                    ComponentBuilder cb = new ComponentBuilder();
+                                    ActionRowBuilder arb = new ActionRowBuilder();
+                                    ButtonBuilder bbdel = new ButtonBuilder($"Cancel", $"cancelimg:{command.Id},{command.User.Id}", ButtonStyle.Danger, null, new Emoji("❌"), false, null);
+                                    arb.AddComponent(bbdel.Build());
+                                    cb.AddRow(arb);
+                                    await command.ModifyOriginalResponseAsync((s) =>
+                                    {
+                                        s.Content = $"Your image is being generated...\n{GetDrawStatus()}";
+                                        s.Components = cb.Build();
+                                    });
+                                }
+                                else if (pos == -1)
+                                {
+                                    // its done
+                                    await command.ModifyOriginalResponseAsync((s) =>
+                                    {
+                                        s.Content = $"Generation finished.";
+                                        s.Components = null;
+                                    });
+                                    return;
+                                }
+                                else
+                                {
+                                    await command.ModifyOriginalResponseAsync((s) =>
+                                    {
+                                        s.Content = $"Your current position in the queue is {pos}...\n{GetDrawStatus()}";
+                                        s.Components = null;
+                                    });
+                                }
+                            }
+                            if (!timerUp)
+                            {
+                                timerUp = true;
+                                await command.ModifyOriginalResponseAsync((s) => { 
+                                    s.Content = $"Your request is taking longer than normal to process. Please wait...";
+                                    s.Components = null;
+                                });
+                            }
+                        });
+                        HistoryResponse? res = await ComfyMain.EnqueueRequest(command.Id, flowName, fields);
                         //SharedContext.Instance.Log(LogLevel.INFO, "ComfyUI", JsonConvert.SerializeObject(res)));
                         if (res == null || res.status.status_str != "success")
                         {
-                            await command.ModifyOriginalResponseAsync((s) => { s.Content = "Your request has failed.";});
+                            if (timerUp)
+                                await command.Channel.SendMessageAsync(text: "Your request has failed.", messageReference: new MessageReference(command.Id));
+                            else
+                                await command.ModifyOriginalResponseAsync((s) => { s.Content = "Your request has failed."; });
                         }
                         else
                         {
@@ -1043,23 +1219,32 @@ namespace ComputeServerTempMonitor.Discord
                                 uint.TryParse(response.Statistics[ImageGenStatisticType.FileSize], out filesize);
                                 if (filesize > SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumFileSize)
                                 {
-                                    await command.ModifyOriginalResponseAsync((s) =>
-                                    {
-                                        s.Content = $"{command.User.Mention} your image was too large to upload: {(int)Math.Ceiling(filesize / 1000000.0)}MB\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]}";
-                                        s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                    });
+                                    if (timerUp)
+                                        await command.Channel.SendMessageAsync(text: $"{command.User.Mention} your image was too large to upload: {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]}", messageReference: new MessageReference(command.Id));
+                                    else
+                                        await command.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"{command.User.Mention} your image was too large to upload: {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]}";
+                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                        });
                                 }
                                 else
                                 {
                                     try
                                     {
-                                        await command.ModifyOriginalResponseAsync((s) =>
-                                        {
-                                            s.Content = $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
-                                            s.Attachments = response.Attachments;
-                                            s.Components = response.Components.Build();
-                                            s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                        });
+                                        if (timerUp)
+                                            await command.Channel.SendFilesAsync(attachments: response.Attachments,
+                                                text: $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB",
+                                                allowedMentions: new AllowedMentions(AllowedMentionTypes.Users),
+                                                components: response.Components.Build());
+                                        else
+                                            await command.ModifyOriginalResponseAsync((s) =>
+                                            {
+                                                s.Content = $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB";
+                                                s.Attachments = response.Attachments;
+                                                s.Components = response.Components.Build();
+                                                s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                            });
                                     }
                                     catch (Exception ex)
                                     {
@@ -1069,7 +1254,6 @@ namespace ComputeServerTempMonitor.Discord
                                             s.Content = $"There was an error generating your image. Please try again later. {ex.Message}";
                                         });
                                     }
-
                                 }
                             }
                             catch (Exception ex)
@@ -1077,6 +1261,7 @@ namespace ComputeServerTempMonitor.Discord
                                 SharedContext.Instance.Log(LogLevel.ERR, "DiscordMain", ex.ToString());
                             }
                         }
+                        timerUp = true;
                     });
                 }
                 // draw command found
@@ -1242,7 +1427,7 @@ namespace ComputeServerTempMonitor.Discord
                         }, cancellationToken);
                     }
                     return;
-                case "tts":
+                case "tts_kokoro":
                     {
                         // AI stuff!
                         string text = "";
@@ -1283,7 +1468,7 @@ namespace ComputeServerTempMonitor.Discord
                                 await command.ModifyOriginalResponseAsync(s => s.Content = "Uploading audio. Please wait...");
                                 await command.ModifyOriginalResponseAsync((s) =>
                                 {
-                                    s.Content = $"TTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
+                                    s.Content = $"Kokoro TTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
                                     s.Attachments = new List<FileAttachment>()
                                             {
                                             new FileAttachment(audioFile)
@@ -1302,86 +1487,13 @@ namespace ComputeServerTempMonitor.Discord
                         }, cancellationToken);
                     }
                     return;
-                case "tts_zonos":
+                case "tts":
                     {
+                        double cfg = 0.5;
+                        double exaggeration = 0.5;
                         string text = "";
-                        double speed = 1.0d;
-                        string lang_code = "en-us";
-                        byte[] voice_sample = null;
+                        string voice_sample = "";
 #pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-                        Task.Run(async () =>
-                        {
-                            try
-                            {
-                                await command.DeferAsync();
-                                foreach (var op in command.Data.Options)
-                                {
-                                    switch (op.Name)
-                                    {
-                                    case "voice_sample":
-                                        {
-                                            Attachment? attch = (op.Value as Attachment);
-                                            if (attch != null)
-                                            {
-                                                voice_sample = await ZonosAPIMain.DownloadAudioSample(attch.Url);
-                                                SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Retrieved voice sample {voice_sample.Length / 1000000}mb");
-                                            }
-                                        }
-                                        break;
-                                    case "voice_preset":
-                                        {
-                                            string pp = SharedContext.Instance.GetConfig().Zonos.Paths.Presets + (string)op.Value;
-                                            if (File.Exists(pp))
-                                            {
-                                                voice_sample = File.ReadAllBytes(pp);
-                                            }
-                                        }
-                                        break;
-                                    case "text":
-                                        text = (string)op.Value;
-                                        break;
-                                    case "speed":
-                                        speed = (double)op.Value;
-                                        break;
-                                    case "language":
-                                        lang_code = (string)op.Value;
-                                        break;
-                                    }
-                                }
-                                // call zonos here
-                                await command.ModifyOriginalResponseAsync(s => s.Content = "Generating voice. Please wait...");
-                                string audioFile = await ZonosAPIMain.Generate(text, speed, lang_code, voice_sample); // dunno what comes back yet
-                                // add a new message
-                                if (audioFile == "")
-                                {
-                                    // Zonos API failed
-                                    await command.ModifyOriginalResponseAsync(s => s.Content = "Zonos API failed. Please try again in a few minutes.");
-                                    return;
-                                }
-                                await command.ModifyOriginalResponseAsync(s => s.Content = "Uploading audio. Please wait...");
-                                await command.ModifyOriginalResponseAsync((s) =>
-                                {
-                                    s.Content = $"ZonosTTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
-                                    s.Attachments = new List<FileAttachment>()
-                                            {
-                                            new FileAttachment(audioFile)
-                                            };
-                                    s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
-                                });
-                                return;
-                            }
-                            catch (Exception ex)
-                            {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts_zonos': " + ex.ToString());
-                            }
-                        }, cancellationToken);
-#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
-                    }
-                    return;
-                case "tts_add_preset":
-                    {
-                        string name = "";
-                        byte[] voice_sample = null;
                         Task.Run(async () =>
                         {
                             try
@@ -1396,8 +1508,157 @@ namespace ComputeServerTempMonitor.Discord
                                                 Attachment? attch = (op.Value as Attachment);
                                                 if (attch != null)
                                                 {
-                                                    voice_sample = await ZonosAPIMain.DownloadAudioSample(attch.Url);
-                                                    SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Received voice preset {voice_sample.Length / 1000000}mb");
+                                                    voice_sample = await ChatterboxMain.DownloadAudioSample(attch.Url, "");
+                                                    SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Retrieved voice sample: {voice_sample}");
+                                                }
+                                            }
+                                            break;
+                                        case "voice":
+                                            {
+                                                string pp = SharedContext.Instance.GetConfig().Chatterbox.Paths.Voices + (string)op.Value;
+                                                if (File.Exists(pp))
+                                                {
+                                                    voice_sample = pp;
+                                                }
+                                            }
+                                            break;
+                                        case "text":
+                                            text = (string)op.Value;
+                                            break;
+                                        case "cfg":
+                                            cfg = (double)op.Value;
+                                            break;
+                                        case "exaggeration":
+                                            exaggeration = (double)op.Value;
+                                            break;
+                                    }
+                                }
+                                // call Chatterbox here
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Generating voice. Please wait...");
+                                string audioFile = await ChatterboxMain.Generate(text, voice_sample, exaggeration, cfg); // dunno what comes back yet
+                                // add a new message
+                                if (audioFile == "")
+                                {
+                                    // Chatterbox API failed
+                                    await command.ModifyOriginalResponseAsync(s => s.Content = "Chatterbox API failed. Please try again in a few minutes.");
+                                    return;
+                                }
+                                await command.ModifyOriginalResponseAsync(s => s.Content = "Uploading audio. Please wait...");
+                                await command.ModifyOriginalResponseAsync((s) =>
+                                {
+                                    s.Content = $"ChatterboxTTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
+                                    s.Attachments = new List<FileAttachment>()
+                                            {
+                                            new FileAttachment(audioFile)
+                                            };
+                                    s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+                                });
+                                return;
+                            }
+                            catch (Exception ex)
+                            {
+                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts': " + ex.ToString());
+                            }
+                        }, cancellationToken);
+#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+                    }
+                    return;
+//                case "tts_zonos":
+//                    {
+//                        string text = "";
+//                        double speed = 1.0d;
+//                        string lang_code = "en-us";
+//                        byte[] voice_sample = null;
+//#pragma warning disable CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+//                        Task.Run(async () =>
+//                        {
+//                            try
+//                            {
+//                                await command.DeferAsync();
+//                                foreach (var op in command.Data.Options)
+//                                {
+//                                    switch (op.Name)
+//                                    {
+//                                    case "voice_sample":
+//                                        {
+//                                            Attachment? attch = (op.Value as Attachment);
+//                                            if (attch != null)
+//                                            {
+//                                                voice_sample = await ZonosAPIMain.DownloadAudioSample(attch.Url);
+//                                                SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Retrieved voice sample {voice_sample.Length / 1000000}mb");
+//                                            }
+//                                        }
+//                                        break;
+//                                    case "voice_preset":
+//                                        {
+//                                            string pp = SharedContext.Instance.GetConfig().Zonos.Paths.Presets + (string)op.Value;
+//                                            if (File.Exists(pp))
+//                                            {
+//                                                voice_sample = File.ReadAllBytes(pp);
+//                                            }
+//                                        }
+//                                        break;
+//                                    case "text":
+//                                        text = (string)op.Value;
+//                                        break;
+//                                    case "speed":
+//                                        speed = (double)op.Value;
+//                                        break;
+//                                    case "language":
+//                                        lang_code = (string)op.Value;
+//                                        break;
+//                                    }
+//                                }
+//                                // call zonos here
+//                                await command.ModifyOriginalResponseAsync(s => s.Content = "Generating voice. Please wait...");
+//                                string audioFile = await ZonosAPIMain.Generate(text, speed, lang_code, voice_sample); // dunno what comes back yet
+//                                // add a new message
+//                                if (audioFile == "")
+//                                {
+//                                    // Zonos API failed
+//                                    await command.ModifyOriginalResponseAsync(s => s.Content = "Zonos API failed. Please try again in a few minutes.");
+//                                    return;
+//                                }
+//                                await command.ModifyOriginalResponseAsync(s => s.Content = "Uploading audio. Please wait...");
+//                                await command.ModifyOriginalResponseAsync((s) =>
+//                                {
+//                                    s.Content = $"ZonosTTS audio generated for {command.User.Mention} at {DateTime.Now.ToString()}";
+//                                    s.Attachments = new List<FileAttachment>()
+//                                            {
+//                                            new FileAttachment(audioFile)
+//                                            };
+//                                    s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
+//                                });
+//                                return;
+//                            }
+//                            catch (Exception ex)
+//                            {
+//                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts_zonos': " + ex.ToString());
+//                            }
+//                        }, cancellationToken);
+//#pragma warning restore CS4014 // Because this call is not awaited, execution of the current method continues before the call is completed
+//                    }
+//                    return;
+                case "tts_preset":
+                    {
+                        string name = "";
+                        string voice_url = "";
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await command.DeferAsync();
+                                foreach (var op in command.Data.Options)
+                                {
+                                    switch (op.Name)
+                                    {
+                                        case "voice_sample":
+                                            {
+                                                Attachment? attch = (op.Value as Attachment);
+                                                if (attch != null)
+                                                {
+                                                    voice_url = attch.Url;
+                                                    SharedContext.Instance.Log(LogLevel.INFO, "Discord", $"Received voice preset");
                                                 }
                                             }
                                             break;
@@ -1406,19 +1667,20 @@ namespace ComputeServerTempMonitor.Discord
                                             break;
                                     }
                                 }
-                                if (name != "" && voice_sample != null)
+                                if (name != "" && voice_url != null)
                                 {
                                     bool replaced = false;
-                                    if (File.Exists(SharedContext.Instance.GetConfig().Zonos.Paths.Presets + name + ".mp3"))
+                                    if (File.Exists(SharedContext.Instance.GetConfig().Chatterbox.Paths.Voices + name + ".mp3"))
                                         replaced = true;
-                                    File.WriteAllBytes(SharedContext.Instance.GetConfig().Zonos.Paths.Presets + name + ".mp3", voice_sample);
-                                    await command.ModifyOriginalResponseAsync(s => s.Content = $"Preset '{name}' {(replaced?"replaced.": "uploaded. Please use /reregister to make it available.")}");
+                                    string voice_sample = await ChatterboxMain.DownloadAudioSample(voice_url, name);
+                                    //File.WriteAllBytes(SharedContext.Instance.GetConfig().Chatterbox.Paths.Voices + name + ".wav", voice_sample);
+                                    await command.ModifyOriginalResponseAsync(s => s.Content = $"Preset '{name}' uploaded. Please use /reregister to make it available.");
                                 }
                                 return;
                             }
                             catch (Exception ex)
                             {
-                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts_add_preset': " + ex.ToString());
+                                SharedContext.Instance.Log(LogLevel.ERR, "Discord", "Could not execute command 'tts_preset': " + ex.ToString());
                             }
                         }, cancellationToken);
                     }
@@ -2102,6 +2364,7 @@ namespace ComputeServerTempMonitor.Discord
                         case "List<samplers>":
                         case "List<schedules>":
                         case "List<styles>":
+                        case "List<positions>":
                             {
                                 string id = field.Value.Type.Substring(5, field.Value.Type.Length - 6);
                                 if (!SharedContext.Instance.GetConfig().ComfyUI.Options.ContainsKey(id))
@@ -2171,7 +2434,7 @@ namespace ComputeServerTempMonitor.Discord
             languageList.AddChoice("Mandarin Chinese","z");
 
             var ttsCommand = new SlashCommandBuilder()
-                .WithName("tts")
+                .WithName("tts_kokoro")
                 .WithDescription("Converts the given text to speech")
                 .AddOption("text", ApplicationCommandOptionType.String, "What you want to be spoken", true)
                 .AddOption(voiceList)
@@ -2193,39 +2456,71 @@ namespace ComputeServerTempMonitor.Discord
             languageList.AddChoice("Korean", "ko");
             languageList.AddChoice("Mandarin Chinese", "cmn");
 
-            var presetVoiceList = new SlashCommandOptionBuilder()
-                .WithName("voice_preset")
+            var chatterboxVoicesList = new SlashCommandOptionBuilder()
+                .WithName("voice")
                 .WithType(ApplicationCommandOptionType.String)
                 .WithDescription("An already uploaded preset voice");
-            if (Directory.Exists(SharedContext.Instance.GetConfig().Zonos.Paths.Presets))
+            if (Directory.Exists(SharedContext.Instance.GetConfig().Chatterbox.Paths.Voices))
             {
-                DirectoryInfo di = new DirectoryInfo(SharedContext.Instance.GetConfig().Zonos.Paths.Presets);
+                DirectoryInfo di = new DirectoryInfo(SharedContext.Instance.GetConfig().Chatterbox.Paths.Voices);
                 foreach (FileInfo fi in di.GetFiles("*.mp3"))
                 {
-                    presetVoiceList.AddChoice(Path.GetFileNameWithoutExtension(fi.Name), fi.Name);
+                    chatterboxVoicesList.AddChoice(Path.GetFileNameWithoutExtension(fi.Name), fi.Name);
                 }
             }
 
-            var zonosTTSCommand = new SlashCommandBuilder()
-                .WithName("tts_zonos")
+            var chatterboxTTSCommand = new SlashCommandBuilder()
+                .WithName("tts")
                 .WithDescription("Converts the given text to speech")
                 .AddOption("text", ApplicationCommandOptionType.String, "What you want to be spoken", true)
                 .AddOption(new SlashCommandOptionBuilder()
-                    .WithName("speed")
+                    .WithName("cfg")
                     .WithType(ApplicationCommandOptionType.Number)
-                    .WithDescription("The speed of the speech, 1.0 is the default")
+                    .WithDescription("Voice cloning strength. Default: 0.5")
                     .WithMinValue(0.0d)
-                    .WithMaxValue(3.0d))
-                .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality sample of the voice to clone")
-                .AddOption(presetVoiceList)
-                .AddOption(languageISOList);
+                    .WithMaxValue(1.0d))
+                .AddOption(chatterboxVoicesList)
+                .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality sample of a voice to clone")
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("exaggeration")
+                    .WithType(ApplicationCommandOptionType.Number)
+                    .WithDescription("Exaggeration level. Default: 0.5")
+                    .WithMinValue(0.0d)
+                    .WithMaxValue(2.0d));
+
+            //var presetVoiceList = new SlashCommandOptionBuilder()
+            //    .WithName("voice_preset")
+            //    .WithType(ApplicationCommandOptionType.String)
+            //    .WithDescription("An already uploaded preset voice");
+            //if (Directory.Exists(SharedContext.Instance.GetConfig().Zonos.Paths.Presets))
+            //{
+            //    DirectoryInfo di = new DirectoryInfo(SharedContext.Instance.GetConfig().Zonos.Paths.Presets);
+            //    foreach (FileInfo fi in di.GetFiles("*.mp3"))
+            //    {
+            //        presetVoiceList.AddChoice(Path.GetFileNameWithoutExtension(fi.Name), fi.Name);
+            //    }
+            //}
+
+            //var zonosTTSCommand = new SlashCommandBuilder()
+            //    .WithName("tts_zonos")
+            //    .WithDescription("Converts the given text to speech")
+            //    .AddOption("text", ApplicationCommandOptionType.String, "What you want to be spoken", true)
+            //    .AddOption(new SlashCommandOptionBuilder()
+            //        .WithName("speed")
+            //        .WithType(ApplicationCommandOptionType.Number)
+            //        .WithDescription("The speed of the speech, 1.0 is the default")
+            //        .WithMinValue(0.0d)
+            //        .WithMaxValue(3.0d))
+            //    .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality sample of the voice to clone")
+            //    .AddOption(presetVoiceList)
+            //    .AddOption(languageISOList);
 
             
             var addTTSPreset = new SlashCommandBuilder()
             .WithName("tts_preset")
-            .WithDescription("Uploads a preset for use with tts_zonos")
+            .WithDescription("Uploads a preset for use with tts")
             .AddOption("name", ApplicationCommandOptionType.String, "The name of the preset / person", true)
-            .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality sample of the voice to clone", true);
+            .AddOption("voice_sample", ApplicationCommandOptionType.Attachment, "A good quality .mp3 of the voice to clone", true);
 
             var cameraList = new SlashCommandOptionBuilder()
                 .WithName("target")
@@ -2290,16 +2585,22 @@ namespace ComputeServerTempMonitor.Discord
 
                 if (CommandAllowed(srvId, "tts"))
                 {
+                    guildCommands[srvId].Add(chatterboxTTSCommand.Build());
                     guildCommands[srvId].Add(ttsCommand.Build());
-                }
-                if (CommandAllowed(srvId, "tts_zonos"))
-                {
-                    guildCommands[srvId].Add(zonosTTSCommand.Build());
-                }
-                if (CommandAllowed(srvId, "tts_preset"))
-                {
                     guildCommands[srvId].Add(addTTSPreset.Build());
                 }
+                if (CommandAllowed(srvId, "tts_kokoro"))
+                {
+                    
+                }
+                //if (CommandAllowed(srvId, "tts_zonos"))
+                //{
+                //    guildCommands[srvId].Add(zonosTTSCommand.Build());
+                //}
+                //if (CommandAllowed(srvId, "tts_preset"))
+                //{
+                    
+                //}
 
                 if (CommandAllowed(srvId, "status"))
                 {

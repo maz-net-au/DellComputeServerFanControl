@@ -34,7 +34,7 @@ namespace ComputeServerTempMonitor.Software
             sb.AppendLine($"\t{"Name".PadRight(12, ' ')}\t{"Status".PadRight(10)}\tQueue");
             foreach (KeyValuePair<string, SoftwareRef> prog in SharedContext.Instance.GetConfig().Software)
             {
-                sb.AppendLine($"\t{prog.Value.Name.PadRight(12, ' ')}\t{(programs.ContainsKey(prog.Key) ? Enum.GetName(programs[prog.Key].State) : "Unknown").PadRight(10)}\t{(prog.Value.Name == "ComfyUI" ? ComfyMain.CurrentQueueLength : 0)}");
+                sb.AppendLine($"\t{prog.Value.Name.PadRight(12, ' ')}\t{(programs.ContainsKey(prog.Key) ? Enum.GetName(programs[prog.Key].State) : "Unknown").PadRight(10)}\t{(prog.Value.Name == "ComfyUI" ? ComfyMain.CurrentQueue.Count : 0)}");
             }
             return sb.ToString();
         }

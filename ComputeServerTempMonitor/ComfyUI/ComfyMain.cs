@@ -6,6 +6,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Net.Http.Json;
 using YamlDotNet.Core.Tokens;
+using System.Collections.Concurrent;
 
 namespace ComputeServerTempMonitor.ComfyUI
 {
@@ -15,10 +16,11 @@ namespace ComputeServerTempMonitor.ComfyUI
         const string historyFile = "data/comfyHistoryCache.json";
         const string requestFile = "data/comfyRequestCache.json";
         static CancellationToken cancellationToken;
-        public static int CurrentQueueLength = 0;
 
         public static Dictionary<string, HistoryResponse> History = new Dictionary<string, HistoryResponse>();
         public static Dictionary<string, GenerationRequest> Requests = new Dictionary<string, GenerationRequest>();
+        public static List<QueuedRequest> CurrentQueue = new List<QueuedRequest>();
+
 
         public static HttpClient hc = new HttpClient();
         public static List<string> GetCheckpoints(string path)
@@ -66,6 +68,26 @@ namespace ComputeServerTempMonitor.ComfyUI
             {
                 SharedContext.Instance.Log(LogLevel.ERR, "ComfyMain", $"Request cache unable to be loaded: {ex.Message}");
             }
+        }
+
+        public static int GetCurrentQueuePosition(ulong id)
+        {
+            for (int i = 0; i < CurrentQueue.Count; i++)
+            {
+                if (CurrentQueue[i].RequestId == id)
+                    return i;
+            }
+            return -1;
+        }
+
+        public static async Task<bool> Cancel(ulong requestId, ulong userId)
+        {
+            if (GetCurrentQueuePosition(requestId) > 0)
+                return false;
+            await hc.PostAsync($"{SharedContext.Instance.GetConfig().ComfyUI.URL}/interrupt", null);
+            if(CurrentQueue.Count > 0 && CurrentQueue[0].RequestId == requestId)
+                CurrentQueue.RemoveAt(0);
+            return true;
         }
 
         public static async Task<string> DownloadImage(string url, string filename)
@@ -136,7 +158,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             }
             return replacements;
         }
-        public static async Task<HistoryResponse?> Variation(string id, int imageNum, float vary_by, string userId)
+        public static async Task<HistoryResponse?> Variation(string id, int imageNum, float vary_by, ulong requestId)
         {
             // if we still have the original request, try do a fancy upscale
             if (!History.ContainsKey(id))
@@ -176,24 +198,24 @@ namespace ComputeServerTempMonitor.ComfyUI
                     if ((Requests[id].type & FlowModelTypes.flux) == FlowModelTypes.flux)
                     {
                         SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new flux variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "flux_variation", GenerateRandoms("flux_variation", rep, false));
+                        return await EnqueueRequest(requestId, "flux_variation", GenerateRandoms("flux_variation", rep, false));
                     }
                     else if ((Requests[id].type & FlowModelTypes.sdxl) == FlowModelTypes.sdxl)
                     {
                         SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "sd_variation", GenerateRandoms("sd_variation", rep, false));
+                        return await EnqueueRequest(requestId, "sd_variation", GenerateRandoms("sd_variation", rep, false));
                     }
                     else if ((Requests[id].type & FlowModelTypes.sd35) == FlowModelTypes.sd35)
                     {
                         SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd3.5 variation request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "sd35_variation", GenerateRandoms("sd35_variation", rep, false));
+                        return await EnqueueRequest(requestId, "sd35_variation", GenerateRandoms("sd35_variation", rep, false));
                     }
                 }
                 // image needs to be a link to the one we're upscaling
             }
             return null;
         }
-        public static async Task<HistoryResponse?> Upscale(string id, int imageNum, float upscale_by, string userId)
+        public static async Task<HistoryResponse?> Upscale(string id, int imageNum, float upscale_by, ulong requestId)
         {
             // if we still have the original request, try do a fancy upscale
             if (!History.ContainsKey(id))
@@ -236,28 +258,28 @@ namespace ComputeServerTempMonitor.ComfyUI
                     if ((Requests[id].type & FlowModelTypes.flux) == FlowModelTypes.flux)
                     {
                         SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new flux upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "flux_upscale", rep);
+                        return await EnqueueRequest(requestId, "flux_upscale", rep);
                     }
                     else if ((Requests[id].type & FlowModelTypes.sdxl) == FlowModelTypes.sdxl)
                     {
                         SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "full_upscale", rep);
+                        return await EnqueueRequest(requestId, "full_upscale", rep);
                     }
                     else if ((Requests[id].type & FlowModelTypes.sd35) == FlowModelTypes.sd35)
                     {
                         SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new sd3.5 upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-                        return await EnqueueRequest(userId, "sd35_upscale", rep);
+                        return await EnqueueRequest(requestId, "sd35_upscale", rep);
                     }
                 }
             }
             // use the basic upscale if we dont have the original model or prompts
             SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Enqueueing new basic upscale request for {SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[imageNum].filename}");
-            return await EnqueueRequest(userId, "basic_upscale", new List<ComfyUIField>()
+            return await EnqueueRequest(requestId, "basic_upscale", new List<ComfyUIField>()
             {
                 img
             });
         }
-        public static async Task<HistoryResponse?> Regenerate(string id, string userId)
+        public static async Task<HistoryResponse?> Regenerate(string id, ulong requestId)
         {
             // need the original request to do this well?
             // what if we had the original flow name, generated new seeds and then ran that into the prompt?
@@ -266,10 +288,55 @@ namespace ComputeServerTempMonitor.ComfyUI
                 
                 List<ComfyUIField> rep = JsonConvert.DeserializeObject<List<ComfyUIField>>(JsonConvert.SerializeObject(Requests[id].replacements));
                 SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", "Enqueueing new regenerate request");
-                return await EnqueueRequest(userId, Requests[id].flowName, GenerateRandoms(Requests[id].flowName, rep, false));
+                return await EnqueueRequest(requestId, Requests[id].flowName, GenerateRandoms(Requests[id].flowName, rep, false));
             }
             SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"Requests does not contain '{id}'");
             return null;
+        }
+
+        public static async Task<HistoryResponse?> Refine(string id, string prompt, int width, int height, ulong requestId)
+        {
+            // do i need the original request?
+            // i guess i need the height, width (if specified),
+            // but i definitely need the new prompt and image path
+            // if we still have the original request, try do a fancy upscale
+            if (!History.ContainsKey(id))
+            {
+                await PopulateHistory(id, 0); // get it if its there
+            }
+            if (!History.ContainsKey(id))
+            {
+                // if its not there now, its never going to be. fail
+                return null;
+            }
+            List<ComfyUIField> rep = new List<ComfyUIField>();
+            if (Requests.ContainsKey(id))
+            {
+                rep = JsonConvert.DeserializeObject<List<ComfyUIField>>(JsonConvert.SerializeObject(Requests[id].replacements)).Where(x => x.Field == "width" || x.Field == "height").ToList();
+            }
+            List<Image> images = new List<Image>();
+            foreach (var node in History[id].outputs)
+            {
+                foreach (var results in node.Value)
+                {
+                    images = results.Value.Where(x => x.type == "output").ToList();
+                }
+            }
+            // gotta add the old image as an attachment, and also add the prompt
+            ComfyUIField img = new ComfyUIField("Load Image", "image", SharedContext.Instance.GetConfig().ComfyUI.Paths.Outputs + images[0].filename);
+            img.Type = "Attachment";
+            rep.Add(img);
+            ComfyUIField p = new ComfyUIField("CLIP Text Encode (Positive Prompt)", "text", prompt);
+            p.Type = "String";
+            rep.Add(p);
+            ComfyUIField w = new ComfyUIField("EmptyLatentImage", "width", width);
+            w.Type = "Number";
+            rep.Add(w);
+            ComfyUIField h = new ComfyUIField("EmptyLatentImage", "height", height);
+            h.Type = "Number";
+            rep.Add(h);
+            SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", "Enqueueing new refine request");
+            return await EnqueueRequest(requestId, "kontext", GenerateRandoms("kontext", rep, false));
         }
 
         public static List<ComfyUIField> FillDefaults(string flowName, List<ComfyUIField> replacements)
@@ -328,7 +395,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             return replacements;
         }
 
-        public static async Task<HistoryResponse?> EnqueueRequest(string userId, string flowName, List<ComfyUIField> replacements)
+        public static async Task<HistoryResponse?> EnqueueRequest(ulong requestId, string flowName, List<ComfyUIField> replacements)
         {
             if (!File.Exists(SharedContext.Instance.GetConfig().ComfyUI.Paths.Prompts + flowName + FLOW_SUFFIX))
             {
@@ -398,11 +465,15 @@ namespace ComputeServerTempMonitor.ComfyUI
                 }
                 SharedContext.Instance.Log(LogLevel.INFO, "ComfyMain", $"New prompt accepted {enqueueResponse.prompt_id}");
                 Requests.Add(enqueueResponse.prompt_id, new GenerationRequest(flowName, SharedContext.Instance.GetConfig().ComfyUI.Flows[flowName].Type, replacements));
-                CurrentQueueLength++;
-                NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueueLength });
+                CurrentQueue.Add(new QueuedRequest()
+                {
+                    RequestId = requestId,
+                    PromptId = enqueueResponse.prompt_id
+                });
+                NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueue.Count });
                 // so now we have a successfully queued prompt. we should poll the /history for it periodically
                 Thread.Sleep(1000);
-                bool success = await PopulateHistory(enqueueResponse.prompt_id, 600000);
+                bool success = await PopulateHistory(enqueueResponse.prompt_id, 1800000); // 30 min timeout
                 if (!success)
                 {
                     SharedContext.Instance.Log(LogLevel.WARN, "ComfyMain", $"A response wasn't generated before the reqeust timed out");
@@ -410,8 +481,8 @@ namespace ComputeServerTempMonitor.ComfyUI
                 }
                 if (!History.ContainsKey(enqueueResponse.prompt_id))
                     return null;
-                CurrentQueueLength--;
-                NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueueLength });
+                CurrentQueue.RemoveAt(0);
+                NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueue.Count });
                 return History[enqueueResponse.prompt_id];
             }
             catch (Exception ex)
@@ -439,8 +510,8 @@ namespace ComputeServerTempMonitor.ComfyUI
                         HttpResponseMessage queueRes = await hc.GetAsync($"{SharedContext.Instance.GetConfig().ComfyUI.URL}/prompt");
                         string content = await queueRes.Content.ReadAsStringAsync();
                         QueueInfo queueInfo = JsonConvert.DeserializeObject<QueueInfo>(content);
-                        CurrentQueueLength = queueInfo.exec_info.queue_remaining;
-                        NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueueLength });
+                        //CurrentQueueLength = queueInfo.exec_info.queue_remaining;
+                        NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueue.Count });
                         if (queueInfo.exec_info.queue_remaining == 0)
                         {
                             // cant be waiting if there's nothing queued
