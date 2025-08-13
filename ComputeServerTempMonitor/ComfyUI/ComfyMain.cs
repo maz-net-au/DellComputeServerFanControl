@@ -445,6 +445,7 @@ namespace ComputeServerTempMonitor.ComfyUI
             //Console.WriteLine(ps);
             try
             {
+                DateTime start = DateTime.Now;
                 HttpRequestMessage hrm = new HttpRequestMessage(HttpMethod.Post, $"{SharedContext.Instance.GetConfig().ComfyUI.URL}/prompt");
                 //hrm.Headers.Add("Content-Type", "application/json");
                 hrm.Content = new StringContent(ps, System.Text.Encoding.UTF8, "application/json");
@@ -483,6 +484,7 @@ namespace ComputeServerTempMonitor.ComfyUI
                     return null;
                 CurrentQueue.RemoveAt(0);
                 NewRelicMain.Log(new Metric() { name = "imagegen.queue.length", value = CurrentQueue.Count });
+                NewRelicMain.Log(new Metric() { name = "imagegen." + flowName + ".generationtime", value = (DateTime.Now - start).TotalSeconds });
                 return History[enqueueResponse.prompt_id];
             }
             catch (Exception ex)

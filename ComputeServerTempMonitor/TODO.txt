@@ -1,0 +1,54 @@
+This project has changed over time, from a simple near-headless CLI tool to take more control of fan speeds, 
+into a a service that provides external network access to my compute server for a dozen different tasks.
+
+Based on actual usage, I want to refactor it into a bot-first service. It needs to be restructed around Discord's
+async task approach, and message / interaction driven interface. E.g. Discord messages or interactions should
+track their source and destination messages, trigger an item into a queue for one of the exposed "features",
+and monitor the status of that task through to completion. It should be build to natively support the 
+permission model (users, servers, and message / interaction permissions) that has started to be hacked in
+as more people used it.
+
+It should be converted to something that can run as a windows service and Discord will start as the new 
+"center" (rather than CLI).
+	Interactions are via slash commands or buttons / modals
+		- create a Task to see it through to completion
+			- this calls functions and maintains a request state
+		- maintains a reference to the initial request
+		- maintains a reference to a single output message. this is updated with progress / result.
+		- output messages manage their own state to determine controls available
+		- some requests are persistant until stopped.
+			- take control of the message lifecycle and handling the discord 3 sec / 15 min requirements
+		- Admin functions either need to be listed on servers, but access gated OR
+			- allow me in my server to control the bot's requests for another server
+			- allow me to manage users for another server from my own
+		- potentially per-server "feature" configuration (see ComfyUI buttons)
+	MAYBE: Provide a HTTP interface to some functions via CF ZeroTrust tunnels
+		- ComfyUI initially
+		- Auth by zero trust?
+	External systems are all state machines that accept requests
+		- Queue requests with an ID
+		- provide functions to monitor the status of that request by ID
+		- provide functions to cancel / update the request by ID
+		- state is managed by those components (for exit / resuming)
+		- output is managed in its own location (move from default output directory)
+	Stats are now integral - still push to new relic, but make available via discord
+		- usage per user
+		- State of each "feature" (queue lengths, eta)
+		- $ consumed (Claude) if possible
+		- hardware statistics (temps, speeds, ups status etc)
+		- dedicated channel for alets and exceptions (tag user) and warnings (no tag)
+	Software should monitor system state and update accordingly
+		- if an app quits, change the state in the discord status
+	Hardware to remain largely unchanged.
+		- Though I want to explicitly start controlling hardware at boot (before login).
+		- windows service with no interaction
+	IoT
+		- Support more devices
+		- State is now available via the hub
+		- query and update state
+			- might require "grouping" to be finished in the hub to be efficient
+		- logging into discord?
+	MAYBE: Add a reminder feature, possibly a natural language parser
+	MAYBE: An inerface to control streaming audio
+	MAYBE: STT and TTS running in a live stream
+	MAYBE: See if I can access 3d printer state (MQTT?)

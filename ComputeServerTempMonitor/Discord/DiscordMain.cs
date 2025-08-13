@@ -20,8 +20,6 @@ using Discord.Audio;
 using ComputeServerTempMonitor.Anthropic;
 using Discord.Rest;
 using ComputeServerTempMonitor.Chatterbox;
-using System.Text.RegularExpressions;
-using static System.Net.Mime.MediaTypeNames;
 
 namespace ComputeServerTempMonitor.Discord
 {
@@ -69,6 +67,8 @@ namespace ComputeServerTempMonitor.Discord
                 {
                     args = parts[1].Split(",").ToList(); // thread ID, message ID (usually)
                 }
+                NewRelic.NewRelicMain.Log(new NewRelic.Models.Metric() { name = $"discord.modal.{parts[0]}.count", value = 1 });
+                //NewRelic.NewRelicMain.Log(new NewRelic.Models.Metric() { name = $"discord.modal.{arg.User.GlobalName}.{parts[0]}.count", value = 1 });
                 switch (parts[0])
                 {
                     case "llmedit":
@@ -117,6 +117,7 @@ namespace ComputeServerTempMonitor.Discord
                                     await arg.RespondAsync("Invalid height specified");
                                 }
                                 await arg.RespondAsync($"Refine request accepted.\n{GetDrawStatus()}");
+                                DateTime timeStart = DateTime.Now;
                                 HistoryResponse? hr = await ComfyMain.Refine(args[0], prompt, width, height, arg.Id);
                                 if (hr == null)
                                 {
@@ -140,7 +141,7 @@ namespace ComputeServerTempMonitor.Discord
                                     {
                                         await arg.ModifyOriginalResponseAsync((s) =>
                                         {
-                                            s.Content = $"Here is your refined image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB";
+                                            s.Content = $"Here is your refined image {arg.User.Mention}\n{res.Statistics[ImageGenStatisticType.Width]}x{res.Statistics[ImageGenStatisticType.Height]} @ {(int)Math.Ceiling(filesize / 1000000.0)}MB in {(timeStart != null ? ((DateTime.Now - timeStart).ToString("mm\\:ss")) : " ??")}";
                                             s.Attachments = res.Attachments;
                                             s.Components = res.Components.Build();
                                             s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
@@ -431,6 +432,8 @@ namespace ComputeServerTempMonitor.Discord
                     guildName = guild.Name;
                 }
                 WriteToUsage(guildName, arg.User.GlobalName, parts[0]);
+                NewRelic.NewRelicMain.Log(new NewRelic.Models.Metric() { name = $"discord.button.{parts[0]}.count", value = 1 });
+                //NewRelic.NewRelicMain.Log(new NewRelic.Models.Metric() { name = $"discord.button.{guildName}.{arg.User.GlobalName}.{parts[0]}.count", value = 1 });
                 switch (parts[0])
                 {
                     case "statrefresh":
@@ -439,7 +442,7 @@ namespace ComputeServerTempMonitor.Discord
                             ComponentBuilder cb = new ComponentBuilder();
                             ActionRowBuilder arb = new ActionRowBuilder();
                             ButtonBuilder bref = new ButtonBuilder($"Refresh", $"statrefresh:x", ButtonStyle.Success, null, new Emoji("♻"), false, null);
-                            arb.AddComponent(bref.Build());
+                            arb.AddComponent(bref);
                             cb.AddRow(arb);
 
                             StringBuilder sb = new StringBuilder();
@@ -467,7 +470,7 @@ namespace ComputeServerTempMonitor.Discord
                                     ComponentBuilder cb = new ComponentBuilder();
                                     ActionRowBuilder arb = new ActionRowBuilder();
                                     ButtonBuilder bref = new ButtonBuilder($"Refresh", $"camrefresh:{parts[1]}", ButtonStyle.Success, null, new Emoji("♻"), false, null);
-                                    arb.AddComponent(bref.Build());
+                                    arb.AddComponent(bref);
                                     cb.AddRow(arb);
 
                                     await arg.Message.ModifyAsync((s) =>
@@ -499,7 +502,7 @@ namespace ComputeServerTempMonitor.Discord
                                     ComponentBuilder cb = new ComponentBuilder();
                                     ActionRowBuilder arb = new ActionRowBuilder();
                                     ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
-                                    arb.AddComponent(bbredo.Build());
+                                    arb.AddComponent(bbredo);
                                     cb.AddRow(arb);
                                         await threadChannel.ModifyMessageAsync(msgId, s => { s.Components = cb.Build(); });
                                         await OobaboogaMain.Continue(tId, msgId, arg.User.GlobalName);
@@ -769,7 +772,7 @@ namespace ComputeServerTempMonitor.Discord
                         if (maxDim <= 768)
                             lsmob.Add(new SelectMenuOptionBuilder("4x", "4.0"));
                         SelectMenuBuilder vsmb = new SelectMenuBuilder($"upscale:{hr.prompt[1].ToString()}", lsmob, "Upscale By", 1, 0);
-                        uarb.AddComponent(vsmb.Build());
+                        uarb.AddComponent(vsmb);
                         cb.AddRow(uarb);
                     }
                     if (maxDim <= SharedContext.Instance.GetConfig().ComfyUI.Settings.MaximumControlsDimension && (bool)(discordInfo.GetPreference(server, PreferenceNames.ShowVariationMenu) ?? true) != false)
@@ -785,7 +788,7 @@ namespace ComputeServerTempMonitor.Discord
                         lsmob.Add(new SelectMenuOptionBuilder("94%", "0.94"));
                         lsmob.Add(new SelectMenuOptionBuilder("96%", "0.96"));
                         SelectMenuBuilder vsmb = new SelectMenuBuilder($"variation:{hr.prompt[1].ToString()}", lsmob, "Variation Amount", 1, 0);
-                        varb.AddComponent(vsmb.Build());
+                        varb.AddComponent(vsmb);
                         cb.AddRow(varb);
                     }
                     //ButtonBuilder bb = new ButtonBuilder("v1", res.prompt[1].ToString(), ButtonStyle.Secondary, null, Emote.Parse("<:arrow_heading_up:>"), false, null);
@@ -796,9 +799,9 @@ namespace ComputeServerTempMonitor.Discord
                         ButtonBuilder bbrefine = new ButtonBuilder($"Refine", $"showrefine:{hr.prompt[1].ToString()},{width},{height}", ButtonStyle.Secondary, null, new Emoji("✏"), false, null);
                         // ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
                         //ButtonBuilder mtest = new ButtonBuilder($"Modal Test", $"modal:{hr.prompt[1].ToString()}", ButtonStyle.Success, null, new Emoji("🤔"), false, null);
-                        arb.AddComponent(bbredo.Build());
-                        arb.AddComponent(bbrefine.Build());
-                        //arb.AddComponent(mtest.Build());
+                        arb.AddComponent(bbredo);
+                        arb.AddComponent(bbrefine);
+                        //arb.AddComponent(mtest);
                         cb.AddRow(arb);
                     }
                 }
@@ -923,7 +926,7 @@ namespace ComputeServerTempMonitor.Discord
                         ComponentBuilder cb = new ComponentBuilder();
                         ActionRowBuilder arb = new ActionRowBuilder();
                         ButtonBuilder bbredo = new ButtonBuilder($"Stop", $"stop:{tId}", ButtonStyle.Danger, null, new Emoji("🛑"), false, null);
-                        arb.AddComponent(bbredo.Build());
+                        arb.AddComponent(bbredo);
                         cb.AddRow(arb);
                         ulong resultId = 0;
                         if (attachments.Count > 0)
@@ -969,10 +972,10 @@ namespace ComputeServerTempMonitor.Discord
                             ButtonBuilder bbcont = new ButtonBuilder($"Cont.", $"continue:{threadChannel.Id},{message.Id}", ButtonStyle.Success, null, new Emoji("➡"), false, null);
                             ButtonBuilder bbedit = new ButtonBuilder($"Edit", $"edit:{threadChannel.Id},{message.Id}", ButtonStyle.Secondary, null, new Emoji("✂"), false, null);
                             ButtonBuilder bbdel = new ButtonBuilder($"Delete", $"deletemsg:{threadChannel.Id},{message.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
-                            arb.AddComponent(bbreg.Build());
-                            arb.AddComponent(bbcont.Build());
-                            arb.AddComponent(bbedit.Build());
-                            arb.AddComponent(bbdel.Build());
+                            arb.AddComponent(bbreg);
+                            arb.AddComponent(bbcont);
+                            arb.AddComponent(bbedit);
+                            arb.AddComponent(bbdel);
                             cb.AddRow(arb);
                             await threadChannel.ModifyMessageAsync(message.Id, m => { m.Components = cb.Build(); });
                         }
@@ -987,7 +990,7 @@ namespace ComputeServerTempMonitor.Discord
                 ActionRowBuilder arbt = new ActionRowBuilder();
                 // add regen, remove, edit buttons
                 ButtonBuilder bbdelt = new ButtonBuilder($"Delete Thread", $"delete:{threadChannel.Id}", ButtonStyle.Danger, null, new Emoji("💀"), false, null);
-                arbt.AddComponent(bbdelt.Build());
+                arbt.AddComponent(bbdelt);
                 cbt.AddRow(arbt);
                 messages = await threadChannel.GetMessagesAsync(threadChannel.Id, Direction.After, 2).FlattenAsync();
                 // get the first message maybe?
@@ -1106,6 +1109,8 @@ namespace ComputeServerTempMonitor.Discord
                 }
             }
             WriteToUsage(guildName, command.User.GlobalName, command.Data.Name);
+            NewRelic.NewRelicMain.Log(new NewRelic.Models.Metric() { name = $"discord.command.{command.Data.Name}.count", value = 1 });
+            //NewRelic.NewRelicMain.Log(new NewRelic.Models.Metric() { name = $"discord.command.{guildName}.{command.User.GlobalName}.{command.Data.Name}.count", value = 1 });
             AccessLevel level = discordInfo.CheckPermission(command.GuildId, command.User.Id);
             SharedContext.Instance.Log(LogLevel.INFO, "DiscordMain", $"{command.User.GlobalName} ({command.User.Username}) attempted to use '{command.Data.Name}' with permissions {Enum.GetName<AccessLevel>(level)}");
             if (level == AccessLevel.None)
@@ -1154,51 +1159,62 @@ namespace ComputeServerTempMonitor.Discord
                             }
                         }
                         await command.ModifyOriginalResponseAsync((s) => { s.Content = $"Request received.\n{GetDrawStatus()}"; });
+                        DateTime? timeStart = null;
                         Task.Run(async () =>
                         {
-                            while (!timerUp && (DateTime.Now - received).TotalSeconds < 890)
+                            try
                             {
-                                await Task.Delay(5000);
-                                int pos = ComfyMain.GetCurrentQueuePosition(command.Id);
-                                if (pos == 0)
+                                while (!timerUp && (DateTime.Now - received).TotalSeconds < 890)
                                 {
-                                    ComponentBuilder cb = new ComponentBuilder();
-                                    ActionRowBuilder arb = new ActionRowBuilder();
-                                    ButtonBuilder bbdel = new ButtonBuilder($"Cancel", $"cancelimg:{command.Id},{command.User.Id}", ButtonStyle.Danger, null, new Emoji("❌"), false, null);
-                                    arb.AddComponent(bbdel.Build());
-                                    cb.AddRow(arb);
-                                    await command.ModifyOriginalResponseAsync((s) =>
+                                    await Task.Delay(5000);
+                                    int pos = ComfyMain.GetCurrentQueuePosition(command.Id);
+                                    if (pos == 0)
                                     {
-                                        s.Content = $"Your image is being generated...\n{GetDrawStatus()}";
-                                        s.Components = cb.Build();
-                                    });
+                                        if (timeStart == null)
+                                            timeStart = DateTime.Now;
+                                        ComponentBuilder cb = new ComponentBuilder();
+                                        ActionRowBuilder arb = new ActionRowBuilder();
+                                        ButtonBuilder bbdel = new ButtonBuilder($"Cancel", $"cancelimg:{command.Id},{command.User.Id}", ButtonStyle.Danger, null, new Emoji("🔨"), false, null);
+                                        arb.AddComponent(bbdel);
+                                        cb.AddRow(arb);
+                                        await command.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Your image is being generated... {(DateTime.Now - timeStart):mm\\:ss}\n{GetDrawStatus()}";
+                                            s.Components = cb.Build();
+                                        });
+                                    }
+                                    else if (pos == -1)
+                                    {
+                                        //// its done
+                                        //await command.ModifyOriginalResponseAsync((s) =>
+                                        //{
+                                        //    s.Content = $"Generation finished.";
+                                        //    s.Components = null;
+                                        //});
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        await command.ModifyOriginalResponseAsync((s) =>
+                                        {
+                                            s.Content = $"Your current position in the queue is {pos}...\n{GetDrawStatus()}";
+                                            s.Components = null;
+                                        });
+                                    }
                                 }
-                                else if (pos == -1)
+                                if (!timerUp)
                                 {
-                                    // its done
+                                    timerUp = true;
                                     await command.ModifyOriginalResponseAsync((s) =>
                                     {
-                                        s.Content = $"Generation finished.";
-                                        s.Components = null;
-                                    });
-                                    return;
-                                }
-                                else
-                                {
-                                    await command.ModifyOriginalResponseAsync((s) =>
-                                    {
-                                        s.Content = $"Your current position in the queue is {pos}...\n{GetDrawStatus()}";
+                                        s.Content = $"Your request is taking longer than normal to process. Please wait...";
                                         s.Components = null;
                                     });
                                 }
                             }
-                            if (!timerUp)
+                            catch (Exception ex)
                             {
-                                timerUp = true;
-                                await command.ModifyOriginalResponseAsync((s) => { 
-                                    s.Content = $"Your request is taking longer than normal to process. Please wait...";
-                                    s.Components = null;
-                                });
+                                SharedContext.Instance.Log(LogLevel.ERR, "DiscordMain", "Exception in monitor task:" + ex.ToString());
                             }
                         });
                         HistoryResponse? res = await ComfyMain.EnqueueRequest(command.Id, flowName, fields);
@@ -1234,13 +1250,13 @@ namespace ComputeServerTempMonitor.Discord
                                     {
                                         if (timerUp)
                                             await command.Channel.SendFilesAsync(attachments: response.Attachments,
-                                                text: $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB",
+                                                text: $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB in {(timeStart != null ? ((DateTime.Now - timeStart).Value.ToString("mm\\:ss")) : " ??")}",
                                                 allowedMentions: new AllowedMentions(AllowedMentionTypes.Users),
                                                 components: response.Components.Build());
                                         else
                                             await command.ModifyOriginalResponseAsync((s) =>
                                             {
-                                                s.Content = $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB";
+                                                s.Content = $"Here is your image {command.User.Mention}\n{response.Statistics[ImageGenStatisticType.Width]}x{response.Statistics[ImageGenStatisticType.Height]} @ {((int)Math.Ceiling(filesize / 10000.0)) / 100.0f}MB in {(timeStart != null ? ((DateTime.Now - timeStart).Value.ToString("mm\\:ss")) : " ??")}s";
                                                 s.Attachments = response.Attachments;
                                                 s.Components = response.Components.Build();
                                                 s.AllowedMentions = new AllowedMentions(AllowedMentionTypes.Users);
@@ -1695,7 +1711,7 @@ namespace ComputeServerTempMonitor.Discord
                         ComponentBuilder cb = new ComponentBuilder();
                         ActionRowBuilder arb = new ActionRowBuilder();
                         ButtonBuilder bref = new ButtonBuilder($"Refresh", $"statrefresh:x", ButtonStyle.Success, null, new Emoji("♻"), false, null);
-                        arb.AddComponent(bref.Build());
+                        arb.AddComponent(bref);
                         cb.AddRow(arb);
 
                         StringBuilder sb = new StringBuilder();
@@ -1856,7 +1872,7 @@ namespace ComputeServerTempMonitor.Discord
                                         ComponentBuilder cb = new ComponentBuilder();
                                         ActionRowBuilder arb = new ActionRowBuilder();
                                         ButtonBuilder bref = new ButtonBuilder($"Refresh", $"camrefresh:{target}", ButtonStyle.Success, null, new Emoji("♻"), false, null);
-                                        arb.AddComponent(bref.Build());
+                                        arb.AddComponent(bref);
                                         cb.AddRow(arb);
 
                                         await command.ModifyOriginalResponseAsync((s) =>
